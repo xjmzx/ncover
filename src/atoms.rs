@@ -1,24 +1,26 @@
 use anyhow::{anyhow, Result};
-use lazy_static::*;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::sync::Mutex;
-use xcb::xproto;
+use std::sync::{Mutex, OnceLock};
+use xcb::x;
 use xcb::Connection;
 
-lazy_static! {
-    static ref ATOM_CACHE: Mutex<HashMap<&'static str, xproto::Atom>> = Mutex::new(HashMap::new());
+fn cache() -> &'static Mutex<HashMap<&'static str, x::Atom>> {
+    static CACHE: OnceLock<Mutex<HashMap<&'static str, x::Atom>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub fn get(conn: &Connection, name: &'static str) -> Result<xproto::Atom> {
-    let mut map = ATOM_CACHE
+pub fn get(conn: &Connection, name: &'static str) -> Result<x::Atom> {
+    let mut map = cache()
         .lock()
         .map_err(|_| anyhow!("Failed to access atom cache"))?;
-    match map.entry(name) {
-        Entry::Occupied(entry) => Ok(*entry.get()),
-        Entry::Vacant(entry) => {
-            let interned = xproto::intern_atom(conn, true, name).get_reply()?.atom();
-            Ok(*entry.insert(interned))
-        }
+    if let Some(atom) = map.get(name) {
+        return Ok(*atom);
     }
+    let cookie = conn.send_request(&x::InternAtom {
+        only_if_exists: false,
+        name: name.as_bytes(),
+    });
+    let atom = conn.wait_for_reply(cookie)?.atom();
+    map.insert(name, atom);
+    Ok(atom)
 }

@@ -1,0 +1,22 @@
+[package]
+name = "xcolor-gui"
+version = "0.1.0"
+description = "GTK4 GUI wrapper for the xcolor color picker"
+authors = ["xjmzx"]
+license = "MIT"
+readme = "../README.md"
+edition = "2021"
+rust-version = "1.80"
+
+[[bin]]
+name = "xcolor-gui"
+path = "src/main.rs"
+
+[dependencies]
+gtk4 = { version = "0.9", features = ["v4_10"] }
+gio = "0.20"
+glib = "0.20"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+anyhow = "1"

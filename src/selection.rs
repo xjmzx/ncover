@@ -2,17 +2,16 @@ use anyhow::{anyhow, Error, Result};
 use nix::unistd::{self, fork, ForkResult};
 use std::fs;
 use std::io;
-use std::os::unix::io::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::io::IntoRawFd;
 use std::str::FromStr;
-use xcb::base as xbase;
-use xcb::base::Connection;
-use xcb::xproto;
+use xcb::x;
+use xcb::Connection;
 
 use crate::atoms;
 
 pub fn into_daemon() -> Result<ForkResult> {
-    match unsafe {fork()}? {
+    match unsafe { fork() }? {
         parent @ ForkResult::Parent { .. } => Ok(parent),
         child @ ForkResult::Child => {
             unistd::setsid()?;
@@ -20,19 +19,28 @@ pub fn into_daemon() -> Result<ForkResult> {
             let dev_null = fs::OpenOptions::new()
                 .read(true)
                 .write(true)
-                .open("/dev/null")?
-                .into_raw_fd();
-            for fd in &[
-                io::stdin().as_raw_fd(),
-                io::stdout().as_raw_fd(),
-                io::stderr().as_raw_fd(),
-            ] {
-                unistd::close(*fd)?;
-                unistd::dup2(dev_null, *fd)?;
+                .open("/dev/null")?;
+            let dev_null_raw = dev_null.into_raw_fd();
+            let stdin = io::stdin();
+            let stdout = io::stdout();
+            let stderr = io::stderr();
+            unsafe {
+                redirect_to_dev_null(stdin.as_fd().as_raw_fd(), dev_null_raw)?;
+                redirect_to_dev_null(stdout.as_fd().as_raw_fd(), dev_null_raw)?;
+                redirect_to_dev_null(stderr.as_fd().as_raw_fd(), dev_null_raw)?;
             }
             Ok(child)
         }
     }
+}
+
+unsafe fn redirect_to_dev_null(target_fd: i32, dev_null_raw: i32) -> Result<()> {
+    // dup2 on raw fds atomically replaces the target stdio fd with /dev/null
+    let ret = nix::libc::dup2(dev_null_raw, target_fd);
+    if ret < 0 {
+        return Err(anyhow!("dup2 failed: {}", std::io::Error::last_os_error()));
+    }
+    Ok(())
 }
 
 pub enum Selection {
@@ -55,7 +63,7 @@ impl FromStr for Selection {
 }
 
 impl Selection {
-    fn to_atom(&self, conn: &Connection) -> Result<xproto::Atom> {
+    fn to_atom(&self, conn: &Connection) -> Result<x::Atom> {
         Ok(match *self {
             Selection::Primary => atoms::get(conn, "PRIMARY")?,
             Selection::Secondary => atoms::get(conn, "SECONDARY")?,
@@ -65,109 +73,94 @@ impl Selection {
 }
 
 // The selection daemon presented here is not a perfect implementation of the
-// ICCCM recommendation. Currently, it does not support large transfers and does
-// not verify that the requestor has received the data by monitoring for atom
-// deletion. Additionally, we do not support MULTIPLE and TIMESTAMP targets even
-// though those are required by the spec. However, this implements just enough
-// of the spec to work well enough in practice as color codes do not tend to be
-// that large. However, this assumption could of course fail with custom
-// templates.
+// ICCCM recommendation. It does not support large transfers or MULTIPLE/TIMESTAMP
+// targets, but works in practice for short color codes.
 
 pub fn set_selection(
     conn: &Connection,
-    root: xproto::Window,
+    root: x::Window,
     selection: &Selection,
     string: &str,
 ) -> Result<()> {
-    let selection = selection.to_atom(conn)?;
+    let selection_atom = selection.to_atom(conn)?;
     let utf8_string = atoms::get(conn, "UTF8_STRING")?;
     let targets = atoms::get(conn, "TARGETS")?;
 
-    let window = conn.generate_id();
+    let window: x::Window = conn.generate_id();
 
-    xproto::create_window(
-        conn,
-        0,      // Depth
-        window, // Window
-        root,   // Parent
-        0,
-        0,
-        1,
-        1,                                      // Size
-        0,                                      // Border
-        xproto::WINDOW_CLASS_INPUT_ONLY as u16, // Class
-        xbase::COPY_FROM_PARENT,                // Visual
-        &[],
-    )
-    .request_check()?;
+    conn.check_request(conn.send_request_checked(&x::CreateWindow {
+        depth: 0,
+        wid: window,
+        parent: root,
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1,
+        border_width: 0,
+        class: x::WindowClass::InputOnly,
+        visual: x::COPY_FROM_PARENT,
+        value_list: &[],
+    }))?;
 
-    // It would be better to use a real timestamp
-    xproto::set_selection_owner(conn, window, selection, xbase::CURRENT_TIME).request_check()?;
+    conn.check_request(conn.send_request_checked(&x::SetSelectionOwner {
+        owner: window,
+        selection: selection_atom,
+        time: x::CURRENT_TIME,
+    }))?;
 
-    if xproto::get_selection_owner(conn, selection)
-        .get_reply()?
-        .owner()
-        != window
-    {
+    let owner_cookie = conn.send_request(&x::GetSelectionOwner {
+        selection: selection_atom,
+    });
+    if conn.wait_for_reply(owner_cookie)?.owner() != window {
         return Err(anyhow!("Could not take selection ownership"));
     }
 
     loop {
-        let event = conn.wait_for_event();
-        if let Some(event) = event {
-            match event.response_type() {
-                xproto::SELECTION_REQUEST => {
-                    let event: &xproto::SelectionRequestEvent =
-                        unsafe { xbase::cast_event(&event) };
+        match conn.wait_for_event() {
+            Ok(xcb::Event::X(x::Event::SelectionRequest(ev))) => {
+                let target = ev.target();
+                let property = if target == utf8_string {
+                    conn.check_request(conn.send_request_checked(&x::ChangeProperty {
+                        mode: x::PropMode::Replace,
+                        window: ev.requestor(),
+                        property: ev.property(),
+                        r#type: target,
+                        data: string.as_bytes(),
+                    }))?;
+                    ev.property()
+                } else if target == targets {
+                    let payload: [x::Atom; 2] = [targets, utf8_string];
+                    conn.check_request(conn.send_request_checked(&x::ChangeProperty {
+                        mode: x::PropMode::Replace,
+                        window: ev.requestor(),
+                        property: ev.property(),
+                        r#type: target,
+                        data: &payload,
+                    }))?;
+                    ev.property()
+                } else {
+                    x::ATOM_NONE
+                };
 
-                    // We should check the event timestamp
-
-                    let target = event.target();
-                    let property = if target == utf8_string {
-                        xproto::change_property(
-                            conn,
-                            xproto::PROP_MODE_REPLACE as u8,
-                            event.requestor(),
-                            event.property(),
-                            target,
-                            8,
-                            string.as_bytes(),
-                        )
-                        .request_check()?;
-                        event.property()
-                    } else if target == targets {
-                        xproto::change_property(
-                            conn,
-                            xproto::PROP_MODE_REPLACE as u8,
-                            event.requestor(),
-                            event.property(),
-                            target,
-                            32,
-                            &[targets, utf8_string],
-                        )
-                        .request_check()?;
-                        event.property()
-                    } else {
-                        0
-                    };
-
-                    let response = xproto::SelectionNotifyEvent::new(
-                        event.time(),
-                        event.requestor(),
-                        event.selection(),
-                        target,
-                        property,
-                    );
-                    xproto::send_event(conn, false, event.requestor(), 0, &response)
-                        .request_check()?;
-                }
-                xproto::SELECTION_CLEAR => {
-                    break;
-                }
-                _ => {}
+                let response = x::SelectionNotifyEvent::new(
+                    ev.time(),
+                    ev.requestor(),
+                    ev.selection(),
+                    target,
+                    property,
+                );
+                conn.check_request(conn.send_request_checked(&x::SendEvent {
+                    propagate: false,
+                    destination: x::SendEventDest::Window(ev.requestor()),
+                    event_mask: x::EventMask::empty(),
+                    event: &response,
+                }))?;
             }
-        } else {
-            break;
+            Ok(xcb::Event::X(x::Event::SelectionClear(_))) => {
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => break,
         }
     }
     Ok(())

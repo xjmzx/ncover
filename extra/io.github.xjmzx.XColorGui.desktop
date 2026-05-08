@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=XColor Picker
+GenericName=Color Picker
+Comment=Pick colors from the screen, manage history and palettes
+Keywords=color;picker;palette;design;hex;rgb;hsl;
+TryExec=xcolor-gui
+Exec=xcolor-gui
+Terminal=false
+Type=Application
+Categories=Graphics;Utility;
+Icon=xcolor
+StartupNotify=true
+StartupWMClass=io.github.xjmzx.XColorGui

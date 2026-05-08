@@ -1,6 +1,6 @@
 [package]
 name = "xcolor"
-version = "0.5.1"
+version = "0.6.0"
 description = "Lightweight color picker for X11"
 authors = [
   "Samuel Laurén <samuel.lauren@iki.fi>",
@@ -14,29 +14,30 @@ homepage = "https://github.com/Soft/xcolor"
 repository = "https://github.com/Soft/xcolor"
 build = "build.rs"
 exclude = ["_config.yml"]
-edition = "2018"
+edition = "2021"
+rust-version = "1.80"
 
 [dependencies]
 anyhow = "1"
 nom = "7"
-clap = "2"
-nix = "0.22"
-lazy_static = "1"
+clap = { version = "4", features = ["cargo", "derive"] }
+nix = { version = "0.29", features = ["fs", "process"] }
 
 [dependencies.x11]
 version = "2"
 features = ["xlib", "xcursor"]
 
 [dependencies.xcb]
-version = "0.9"
+version = "1.5"
 features = ["xlib_xcb"]
 
 [build-dependencies]
-clap = "2"
+clap = { version = "4", features = ["cargo", "derive"] }
+clap_complete = "4"
 
 [profile.release]
 lto = true
 panic = "abort"
 
-[badges]
-travis-ci = { repository = "Soft/xcolor" }
+[workspace]
+members = ["xcolor-gui"]

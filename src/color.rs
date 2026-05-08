@@ -1,6 +1,5 @@
 use anyhow::{anyhow, Result};
-use std;
-use xcb::xproto;
+use xcb::x;
 use xcb::Connection;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -76,29 +75,28 @@ impl ARGB {
 
 impl From<ARGB> for u32 {
     fn from(color: ARGB) -> u32 {
-        u32::from(color.a) << 24
-            | u32::from(color.r) << 16
-            | u32::from(color.g) << 8
+        (u32::from(color.a) << 24)
+            | (u32::from(color.r) << 16)
+            | (u32::from(color.g) << 8)
             | u32::from(color.b)
     }
 }
 
 pub fn window_rect(
     conn: &Connection,
-    window: xproto::Window,
+    window: x::Window,
     (x, y, width, height): (i16, i16, u16, u16),
 ) -> Result<Vec<ARGB>> {
-    let reply = xproto::get_image(
-        conn,
-        xproto::IMAGE_FORMAT_Z_PIXMAP as u8,
-        window,
+    let cookie = conn.send_request(&x::GetImage {
+        format: x::ImageFormat::ZPixmap,
+        drawable: x::Drawable::Window(window),
         x,
         y,
         width,
         height,
-        std::u32::MAX,
-    )
-    .get_reply()?;
+        plane_mask: u32::MAX,
+    });
+    let reply = conn.wait_for_reply(cookie)?;
 
     if reply.depth() != 24 {
         // TODO: Figure out what to do with these
@@ -106,7 +104,7 @@ pub fn window_rect(
     }
 
     let data = reply.data();
-    let mut pixels = Vec::with_capacity(data.len());
+    let mut pixels = Vec::with_capacity(data.len() / 4);
     for chunk in data.chunks(4) {
         pixels.push(ARGB::new(0xff, chunk[2], chunk[1], chunk[0]));
     }
