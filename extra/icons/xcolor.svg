@@ -3,7 +3,7 @@
 <rect width="1024" height="1024" fill="url(#paint0_linear_3323_75)"/>
 </mask>
 <g mask="url(#mask0_3323_75)">
-<rect width="1024" height="1024" rx="80" fill="url(#paint1_linear_3323_75)"/>
+<rect width="1024" height="1024" rx="80" fill="url(#paint1_linear_3323_75)" fill-opacity="0.8"/>
 <path d="M0 442H206C233.614 442 256 464.386 256 492V676C256 703.614 233.614 726 206 726H0V442Z" fill="#FF0004" style="mix-blend-mode:soft-light"/>
 <path d="M256 442H462C489.614 442 512 464.386 512 492V676C512 703.614 489.614 726 462 726H256V442Z" fill="#F7FF00" style="mix-blend-mode:saturation"/>
 <path d="M512 442H718C745.614 442 768 464.386 768 492V676C768 703.614 745.614 726 718 726H512V442Z" fill="#00FF22" style="mix-blend-mode:overlay"/>
