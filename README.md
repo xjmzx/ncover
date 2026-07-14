@@ -1,15 +1,21 @@
 # xcolor 🌈
 
-[![Build Status](https://api.travis-ci.org/Soft/xcolor.svg?branch=master)](https://travis-ci.org/Soft/xcolor)
-[![Latest Version](https://img.shields.io/crates/v/xcolor.svg)](https://crates.io/crates/xcolor)
-[![GitHub release](https://img.shields.io/github/release/Soft/xcolor.svg)](https://github.com/Soft/xcolor/releases)
-[![dependency status](https://deps.rs/repo/github/soft/xcolor/status.svg)](https://deps.rs/repo/github/soft/xcolor)
+[![GitHub release](https://img.shields.io/github/v/release/xjmzx/xcolor.svg)](https://github.com/xjmzx/xcolor/releases)
+[![dependency status](https://deps.rs/repo/github/xjmzx/xcolor/status.svg)](https://deps.rs/repo/github/xjmzx/xcolor)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-<img align="right" width="250" src="https://raw.githubusercontent.com/Soft/xcolor/master/extra/screenshot.png">
+<img align="right" width="250" src="https://raw.githubusercontent.com/xjmzx/xcolor/main/extra/screenshot.png">
 
 Lightweight color picker for X11. Use mouse to select colors visible anywhere on
 the screen to get their RGB representation.
+
+> **About this repository.** Originally forked from
+> [`Soft/xcolor`](https://github.com/Soft/xcolor) by Samuel Laurén, which is no
+> longer maintained. This version modernizes the crate (xcb 1.5, clap 4, nix
+> 0.29, edition 2021) and adds **`xcolor-gui`** — a GTK4 desktop wrapper that
+> keeps a colour history and named palettes, and exports to GPL / CSS / JSON.
+> The CLI below is unchanged in spirit and remains the picker; the GUI shells out
+> to it. MIT-licensed, as upstream.
 
 ## Installation
 
@@ -29,7 +35,7 @@ To get the latest development version of `xcolor`, you can direct cargo to
 install from the git repository:
 
 ``` shell
-cargo install --git 'https://github.com/Soft/xcolor.git'
+cargo install --git 'https://github.com/xjmzx/xcolor.git'
 ```
 
 Installing `xcolor` with cargo will not install its manual page or desktop file.
@@ -153,4 +159,4 @@ and padded with zeroes to be sixteen characters long.
 
 ## Issues
 
-Bugs & Issues should be reported at [GitHub](https://github.com/Soft/xcolor/issues).
+Bugs & Issues should be reported at [GitHub](https://github.com/xjmzx/xcolor/issues).
