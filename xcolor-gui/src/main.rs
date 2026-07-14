@@ -589,6 +589,16 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     // preference to the source, so the disc IS the preview — you are looking at
     // the thing you would save, not an approximation of it.
     let out: Rc<RefCell<Option<gdk_pixbuf::Pixbuf>>> = Rc::new(RefCell::new(None));
+    // Where the source sits on the fixed 400x400 canvas.
+    let place: Rc<RefCell<Placement>> = Rc::new(RefCell::new(Placement {
+        dx: 0.0,
+        dy: 0.0,
+        scale: 1.0,
+    }));
+    let grid_on: Rc<RefCell<bool>> = Rc::new(RefCell::new(true));
+    // Which guides fired on the last move — drawn so you can SEE why the image
+    // stopped. A snap you cannot see is just a bug.
+    let snapped: Rc<RefCell<(bool, bool)>> = Rc::new(RefCell::new((false, false)));
 
     let box_ = GBox::new(Orientation::Vertical, 8);
 
@@ -617,6 +627,36 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     header.append(&pal_btn);
     box_.append(&header);
 
+    // ---- placement controls -----------------------------------------------
+    let ctl = GBox::new(Orientation::Horizontal, 6);
+    let ctl_lbl = Label::new(Some(&format!("{CANVAS}×{CANVAS}")));
+    ctl_lbl.add_css_class("dim-label");
+    ctl_lbl.set_tooltip_text(Some(
+        "The output is always this size. Drag to reposition, scroll to zoom.",
+    ));
+    ctl.append(&ctl_lbl);
+
+    let b_grid = ToggleButton::with_label("Grid");
+    b_grid.set_active(true);
+    b_grid.set_tooltip_text(Some("Thirds + centre cross. A guide — never exported."));
+    ctl.append(&b_grid);
+
+    let b_fit = Button::with_label("Fit");
+    b_fit.set_tooltip_text(Some("Whole image inside the canvas"));
+    let b_cover = Button::with_label("Cover");
+    b_cover.set_tooltip_text(Some("Fill the canvas — no gaps"));
+    let b_centre = Button::with_label("Centre");
+    b_centre.set_tooltip_text(Some("Centre without changing the zoom"));
+    let b_11 = Button::with_label("1:1");
+    b_11.set_tooltip_text(Some("Actual pixels"));
+    for b in [&b_fit, &b_cover, &b_centre, &b_11] {
+        b.set_sensitive(false);
+        ctl.append(b);
+    }
+    b_grid.set_sensitive(false);
+    ctl.set_visible(false);
+    box_.append(&ctl);
+
     // 400x400 is the floor, not the size — it expands with the window.
     let area = gtk::DrawingArea::new();
     area.set_content_width(400);
@@ -630,6 +670,12 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         pixbuf,
         #[strong]
         out,
+        #[strong]
+        place,
+        #[strong]
+        grid_on,
+        #[strong]
+        snapped,
         move |_, cr, w, h| {
             let (w, h) = (w as f64, h as f64);
 
@@ -652,22 +698,86 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
             }
             let _ = cr.fill();
 
-            let Some(pb) = out.borrow().clone().or_else(|| pixbuf.borrow().clone()) else {
-                return;
-            };
-            let (ox, oy, scale) =
-                fitted(pb.width() as f64, pb.height() as f64, w, h);
+            // The CANVAS is what is fitted into the widget — not the image. The
+            // image lives on the canvas, and may hang off its edges.
+            let (ox, oy, view) = fitted(CANVAS as f64, CANVAS as f64, w, h);
             cr.save().ok();
             cr.translate(ox, oy);
-            cr.scale(scale, scale);
-            cr.set_source_pixbuf(&pb, 0.0, 0.0);
-            // Nearest-neighbour when magnified: this is a colour tool, and
-            // smoothing invents colours that are not in the file.
-            if scale > 1.0 {
-                cr.source().set_filter(gtk::cairo::Filter::Nearest);
+            cr.scale(view, view);
+
+            // Everything is clipped to the canvas: what falls outside the 400x400
+            // is not in the output, so it must not be in the preview either.
+            cr.rectangle(0.0, 0.0, CANVAS as f64, CANVAS as f64);
+            cr.clip();
+
+            if let Some(pb) = out.borrow().clone() {
+                // A template has been applied: THAT is the result, drawn as-is.
+                cr.set_source_pixbuf(&pb, 0.0, 0.0);
+                if view > 1.0 {
+                    cr.source().set_filter(gtk::cairo::Filter::Nearest);
+                }
+                let _ = cr.paint();
+            } else if let Some(pb) = pixbuf.borrow().clone() {
+                let p = *place.borrow();
+                cr.save().ok();
+                cr.translate(p.dx, p.dy);
+                cr.scale(p.scale, p.scale);
+                cr.set_source_pixbuf(&pb, 0.0, 0.0);
+                // Nearest when magnified: a colour tool must not invent colours.
+                if p.scale * view > 1.0 {
+                    cr.source().set_filter(gtk::cairo::Filter::Nearest);
+                }
+                let _ = cr.paint();
+                cr.restore().ok();
             }
-            let _ = cr.paint();
+
+            // Grid — thirds, plus an emphasised centre cross. Drawn OVER the
+            // image (it is a guide, not part of the picture) and never exported.
+            if *grid_on.borrow() && out.borrow().is_none() {
+                let c = CANVAS as f64;
+                cr.set_line_width(1.0 / view);
+                cr.set_source_rgba(1.0, 1.0, 1.0, 0.18);
+                for i in 1..3 {
+                    let t = c * i as f64 / 3.0;
+                    cr.move_to(t, 0.0);
+                    cr.line_to(t, c);
+                    cr.move_to(0.0, t);
+                    cr.line_to(c, t);
+                }
+                let _ = cr.stroke();
+                cr.set_source_rgba(1.0, 1.0, 1.0, 0.35);
+                cr.move_to(c / 2.0, 0.0);
+                cr.line_to(c / 2.0, c);
+                cr.move_to(0.0, c / 2.0);
+                cr.line_to(c, c / 2.0);
+                let _ = cr.stroke();
+            }
+
+            // Snap guides — cyan, only while a guide is actually holding.
+            let (sx, sy) = *snapped.borrow();
+            if (sx || sy) && out.borrow().is_none() {
+                let c = CANVAS as f64;
+                cr.set_source_rgba(0.2, 0.9, 1.0, 0.9);
+                cr.set_line_width(1.5 / view);
+                if sx {
+                    cr.move_to(c / 2.0, 0.0);
+                    cr.line_to(c / 2.0, c);
+                }
+                if sy {
+                    cr.move_to(0.0, c / 2.0);
+                    cr.line_to(c, c / 2.0);
+                }
+                let _ = cr.stroke();
+            }
+
             cr.restore().ok();
+
+            // Canvas border — the 400x400 bound, so you can see what you are
+            // composing INTO.
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.45);
+            cr.set_line_width(1.0);
+            cr.rectangle(ox + 0.5, oy + 0.5, CANVAS as f64 * view - 1.0, CANVAS as f64 * view - 1.0);
+            let _ = cr.stroke();
         }
     ));
 
@@ -726,6 +836,163 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         }
     ));
     area.add_controller(click);
+
+    // Drag to reposition. The click gesture above still picks — GTK routes a
+    // press to both, and a drag that never moves is just a click.
+    let drag = gtk::GestureDrag::new();
+    let start: Rc<RefCell<Placement>> = Rc::new(RefCell::new(Placement {
+        dx: 0.0,
+        dy: 0.0,
+        scale: 1.0,
+    }));
+    drag.connect_drag_begin(clone!(
+        #[strong]
+        place,
+        #[strong]
+        start,
+        move |_, _, _| {
+            *start.borrow_mut() = *place.borrow();
+        }
+    ));
+    drag.connect_drag_update(clone!(
+        #[strong]
+        place,
+        #[strong]
+        start,
+        #[strong]
+        pixbuf,
+        #[strong]
+        out,
+        #[strong]
+        snapped,
+        #[weak]
+        area,
+        move |_, ox, oy| {
+            if out.borrow().is_some() {
+                return; // a template is applied — reset to move it again
+            }
+            let Some(src) = pixbuf.borrow().clone() else { return };
+            // Widget pixels -> canvas pixels. Without dividing by the view scale
+            // the image would race ahead of (or lag) the cursor.
+            let (_, _, view) = fitted(
+                CANVAS as f64,
+                CANVAS as f64,
+                area.width() as f64,
+                area.height() as f64,
+            );
+            let s0 = *start.borrow();
+            let want = Placement {
+                dx: s0.dx + ox / view,
+                dy: s0.dy + oy / view,
+                scale: s0.scale,
+            };
+            let (p, sx, sy) = snap(want, src.width(), src.height());
+            *place.borrow_mut() = p;
+            *snapped.borrow_mut() = (sx, sy);
+            area.queue_draw();
+        }
+    ));
+    drag.connect_drag_end(clone!(
+        #[strong]
+        snapped,
+        #[weak]
+        area,
+        move |_, _, _| {
+            *snapped.borrow_mut() = (false, false);
+            area.queue_draw();
+        }
+    ));
+    area.add_controller(drag);
+
+    // Scroll to zoom, about the canvas centre.
+    let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    scroll.connect_scroll(clone!(
+        #[strong]
+        place,
+        #[strong]
+        out,
+        #[weak]
+        area,
+        #[upgrade_or]
+        glib::Propagation::Proceed,
+        move |_, _, dy| {
+            if out.borrow().is_some() {
+                return glib::Propagation::Proceed;
+            }
+            let mut p = place.borrow_mut();
+            let c = CANVAS as f64 / 2.0;
+            // Keep the canvas centre fixed under the zoom, so the thing you are
+            // looking at does not fly off.
+            let old = p.scale;
+            let new = (old * if dy < 0.0 { 1.1 } else { 1.0 / 1.1 }).clamp(0.02, 20.0);
+            p.dx = c - (c - p.dx) * (new / old);
+            p.dy = c - (c - p.dy) * (new / old);
+            p.scale = new;
+            drop(p);
+            area.queue_draw();
+            glib::Propagation::Stop
+        }
+    ));
+    area.add_controller(scroll);
+
+    b_grid.connect_toggled(clone!(
+        #[strong]
+        grid_on,
+        #[weak]
+        area,
+        move |b| {
+            *grid_on.borrow_mut() = b.is_active();
+            area.queue_draw();
+        }
+    ));
+
+    // Fit / Cover / Centre / 1:1 — the four framings you actually reach for.
+    let reframe = {
+        let pixbuf = pixbuf.clone();
+        let place = place.clone();
+        let out = out.clone();
+        let area = area.clone();
+        Rc::new(move |mode: u8| {
+            let Some(src) = pixbuf.borrow().clone() else { return };
+            if out.borrow().is_some() {
+                return;
+            }
+            let (sw, sh) = (src.width(), src.height());
+            let c = CANVAS as f64;
+            let mut p = place.borrow_mut();
+            match mode {
+                0 => {
+                    // Fit: whole image inside, centred.
+                    let sc = (c / sw as f64).min(c / sh as f64);
+                    *p = Placement {
+                        scale: sc,
+                        dx: (c - sw as f64 * sc) / 2.0,
+                        dy: (c - sh as f64 * sc) / 2.0,
+                    };
+                }
+                1 => *p = Placement::cover(sw, sh),
+                2 => {
+                    // Centre, keeping the current zoom.
+                    p.dx = (c - p.w(sw)) / 2.0;
+                    p.dy = (c - p.h(sh)) / 2.0;
+                }
+                _ => {
+                    *p = Placement {
+                        scale: 1.0,
+                        dx: (c - sw as f64) / 2.0,
+                        dy: (c - sh as f64) / 2.0,
+                    };
+                }
+            }
+            drop(p);
+            area.queue_draw();
+        })
+    };
+    for (b, mode) in [(&b_fit, 0u8), (&b_cover, 1), (&b_centre, 2), (&b_11, 3)] {
+        let reframe = reframe.clone();
+        b.connect_clicked(move |_| reframe(mode));
+    }
+
     box_.append(&area);
 
     // Inspect panel — SVG only, and empty otherwise. An SVG states its colours,
@@ -772,6 +1039,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
 
     let apply = {
         let pixbuf = pixbuf.clone();
+        let place = place.clone();
         let out = out.clone();
         let shared = shared.clone();
         let area = area.clone();
@@ -807,7 +1075,16 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
                     }
                 },
             };
-            match disc_template(&src, fill) {
+            // Compose onto the fixed canvas FIRST — the disc masks what you have
+            // framed, not the original file.
+            let canvas = match compose(&src, *place.borrow()) {
+                Ok(c) => c,
+                Err(e) => {
+                    show_error(&window, &format!("Canvas failed: {e}"));
+                    return;
+                }
+            };
+            match disc_template(&canvas, fill) {
                 Ok(pb) => {
                     *out.borrow_mut() = Some(pb);
                     b_save.set_sensitive(true);
@@ -989,6 +1266,20 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         #[strong]
         name,
         #[strong]
+        place,
+        #[weak]
+        ctl,
+        #[weak]
+        b_grid,
+        #[weak]
+        b_fit,
+        #[weak]
+        b_cover,
+        #[weak]
+        b_centre,
+        #[weak]
+        b_11,
+        #[strong]
         svg,
         #[strong]
         out,
@@ -1036,6 +1327,20 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
                     pixbuf,
                     #[strong]
                     name,
+                    #[strong]
+                    place,
+                    #[weak]
+                    ctl,
+                    #[weak]
+                    b_grid,
+                    #[weak]
+                    b_fit,
+                    #[weak]
+                    b_cover,
+                    #[weak]
+                    b_centre,
+                    #[weak]
+                    b_11,
                     #[strong]
                     svg,
                     #[strong]
@@ -1110,10 +1415,17 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
                                 } else {
                                     "The image's dominant colours, quantised from its pixels"
                                 }));
+                                let (pw, ph) = (pb.width(), pb.height());
                                 *name.borrow_mut() = n;
                                 *pixbuf.borrow_mut() = Some(pb);
                                 *svg.borrow_mut() = info;
                                 *out.borrow_mut() = None; // a new image drops any old template
+                                *place.borrow_mut() = Placement::cover(pw, ph);
+                                ctl.set_visible(true);
+                                b_grid.set_sensitive(true);
+                                for b in [&b_fit, &b_cover, &b_centre, &b_11] {
+                                    b.set_sensitive(true);
+                                }
                                 pal_btn.set_sensitive(true);
                                 tpl.set_visible(true);
                                 for b in [&b_alpha, &b_white, &b_solid, &b_grad, &b_reset] {
@@ -1275,6 +1587,118 @@ fn write_css(path: &Path, pal: &Palette) -> Result<()> {
 /// tool emits a slightly different dialect. We need three ints; a hex column
 /// and a name are both optional, and anything after the hex is the name (GIMP's
 /// own convention, and what `write_gpl` emits).
+// ---------- canvas + placement ----------
+//
+// The output is a FIXED 400x400 canvas. A source image of any dimensions is
+// PLACED on it — offset and scale — rather than being cropped to fit. So the
+// question stops being "how do we squeeze this in" and becomes "where on the
+// canvas does this go", which is the one the user is actually asking.
+
+/// The output size. Everything downstream — the disc, the save — is this square.
+const CANVAS: i32 = 400;
+
+/// How close (in canvas pixels) an edge or centre must come before it snaps.
+/// "Medium": firm enough to catch you, loose enough that you can sit 12px off
+/// centre on purpose.
+const SNAP: f64 = 10.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Placement {
+    /// Top-left of the scaled image, in canvas coordinates.
+    dx: f64,
+    dy: f64,
+    scale: f64,
+}
+
+impl Placement {
+    /// Scale to COVER the canvas, centred — the sane opening position: no gaps,
+    /// nothing arbitrary cropped off one side.
+    fn cover(sw: i32, sh: i32) -> Placement {
+        let scale = (CANVAS as f64 / sw as f64).max(CANVAS as f64 / sh as f64);
+        Placement {
+            dx: (CANVAS as f64 - sw as f64 * scale) / 2.0,
+            dy: (CANVAS as f64 - sh as f64 * scale) / 2.0,
+            scale,
+        }
+    }
+    fn w(&self, sw: i32) -> f64 {
+        sw as f64 * self.scale
+    }
+    fn h(&self, sh: i32) -> f64 {
+        sh as f64 * self.scale
+    }
+}
+
+/// Snap `p` to the canvas's centre and edges. Each axis is considered
+/// independently — you can be snapped horizontally while still free vertically,
+/// which is what makes it feel like a guide rather than a magnet.
+///
+/// Returns the snapped placement plus which guides fired, so the view can SHOW
+/// why the image stopped moving. A snap you cannot see is just a bug.
+fn snap(p: Placement, sw: i32, sh: i32) -> (Placement, bool, bool) {
+    let (mut p, c) = (p, CANVAS as f64);
+    let (iw, ih) = (p.w(sw), p.h(sh));
+
+    // x: left edge, right edge, centre-to-centre.
+    let cands_x = [(0.0, 0.0), (c - iw, c), ((c - iw) / 2.0, c / 2.0)];
+    let mut sx = None;
+    for (target, _) in cands_x {
+        if (p.dx - target).abs() <= SNAP {
+            p.dx = target;
+            sx = Some(target);
+            break;
+        }
+    }
+    let cands_y = [(0.0, 0.0), (c - ih, c), ((c - ih) / 2.0, c / 2.0)];
+    let mut sy = None;
+    for (target, _) in cands_y {
+        if (p.dy - target).abs() <= SNAP {
+            p.dy = target;
+            sy = Some(target);
+            break;
+        }
+    }
+    (p, sx.is_some(), sy.is_some())
+}
+
+/// Render the placed source onto the fixed 400x400 canvas. Outside the image is
+/// transparent — the disc's corner fill decides what happens there, not this.
+fn compose(src: &gdk_pixbuf::Pixbuf, p: Placement) -> Result<gdk_pixbuf::Pixbuf> {
+    let dst = gdk_pixbuf::Pixbuf::new(
+        gdk_pixbuf::Colorspace::Rgb,
+        true,
+        8,
+        CANVAS,
+        CANVAS,
+    )
+    .context("could not allocate the canvas")?;
+    dst.fill(0x00000000);
+
+    let (sw, sh) = (src.width(), src.height());
+    let sbytes = unsafe { src.pixels() };
+    let drow = dst.rowstride() as usize;
+    let dbytes = unsafe { dst.pixels() };
+
+    for y in 0..CANVAS {
+        for x in 0..CANVAS {
+            // Canvas pixel -> source pixel (nearest: a colour tool must not
+            // invent colours that are in neither neighbour).
+            let sx = ((x as f64 + 0.5 - p.dx) / p.scale).floor() as i32;
+            let sy = ((y as f64 + 0.5 - p.dy) / p.scale).floor() as i32;
+            if sx < 0 || sy < 0 || sx >= sw || sy >= sh {
+                continue; // left transparent
+            }
+            let (r, g, b, a) = sample(src, sbytes, sx, sy);
+            let i = y as usize * drow + x as usize * 4;
+            dbytes[i] = r;
+            dbytes[i + 1] = g;
+            dbytes[i + 2] = b;
+            dbytes[i + 3] = a;
+        }
+    }
+    Ok(dst)
+}
+
 // ---------- disc template ----------
 //
 // Mask artwork into a disc — a record label, a CD face — with the corners left
@@ -2335,5 +2759,73 @@ mod disc_tests {
         assert_eq!(out.height(), 128);
         // Top-centre is inside the disc and must be artwork, not padding.
         assert_eq!(px(&out, 64, 4), (0, 255, 0, 255));
+    }
+}
+
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+
+    #[test]
+    fn cover_centres_and_fills_the_canvas() {
+        // A wide source: scaled so the SHORT axis reaches across, centred, with
+        // the long axis overhanging equally both sides.
+        let p = Placement::cover(800, 400);
+        assert_eq!(p.scale, 1.0); // 400/400 on the short axis
+        assert_eq!(p.dy, 0.0);
+        assert_eq!(p.dx, -200.0); // (400 - 800) / 2
+        // Nothing is left uncovered.
+        assert!(p.w(800) >= CANVAS as f64 && p.h(400) >= CANVAS as f64);
+    }
+
+    #[test]
+    fn snaps_to_centre() {
+        let p = Placement { dx: 3.0, dy: -4.0, scale: 1.0 }; // a 400x400 source
+        let (s, sx, sy) = snap(p, 400, 400);
+        assert_eq!((s.dx, s.dy), (0.0, 0.0)); // centre == edges here
+        assert!(sx && sy);
+    }
+
+    #[test]
+    fn snaps_each_axis_independently() {
+        // Snapped horizontally, free vertically — that is what makes it feel
+        // like a guide and not a magnet.
+        let p = Placement { dx: 2.0, dy: 100.0, scale: 1.0 };
+        let (s, sx, sy) = snap(p, 400, 400);
+        assert_eq!(s.dx, 0.0);
+        assert_eq!(s.dy, 100.0, "vertical was far from any guide; leave it alone");
+        assert!(sx && !sy);
+    }
+
+    #[test]
+    fn does_not_snap_beyond_the_threshold() {
+        // You must be able to sit deliberately off-centre.
+        let p = Placement { dx: 25.0, dy: 25.0, scale: 1.0 };
+        let (s, sx, sy) = snap(p, 400, 400);
+        assert_eq!((s.dx, s.dy), (25.0, 25.0));
+        assert!(!sx && !sy);
+    }
+
+    #[test]
+    fn snaps_a_small_image_to_the_canvas_centre() {
+        // A 100x100 image: centre-to-centre means dx = (400-100)/2 = 150.
+        let p = Placement { dx: 146.0, dy: 150.0, scale: 1.0 };
+        let (s, _, _) = snap(p, 100, 100);
+        assert_eq!(s.dx, 150.0);
+    }
+
+    #[test]
+    fn compose_places_the_image_where_you_put_it() {
+        let src = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, true, 8, 10, 10).unwrap();
+        src.fill(0xFF0000FF);
+        let c = compose(&src, Placement { dx: 100.0, dy: 100.0, scale: 1.0 }).unwrap();
+        assert_eq!(c.width(), CANVAS);
+        let b = unsafe { c.pixels() };
+        let at = |x: i32, y: i32| {
+            let i = y as usize * c.rowstride() as usize + x as usize * 4;
+            (b[i], b[i + 1], b[i + 2], b[i + 3])
+        };
+        assert_eq!(at(105, 105), (255, 0, 0, 255), "inside the placed image");
+        assert_eq!(at(50, 50).3, 0, "outside it is transparent, not black");
     }
 }
