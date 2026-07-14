@@ -2,17 +2,22 @@ DESTDIR =
 PREFIX = /usr/local
 CARGO_FLAGS =
 
-.PHONY: all gui install install-gui install-all uninstall help
+.PHONY: all gui install install-gui install-all uninstall help FORCE
 
 all: target/release/xcolor
 
 gui: target/release/xcolor-gui
 
-target/release/xcolor:
+# FORCE, because these rules have no prerequisites: once the binary exists make
+# considers it up to date and `make install` silently ships a STALE build. Cargo
+# does its own up-to-date check, so running it every time costs nothing.
+target/release/xcolor: FORCE
 	cargo build --release $(CARGO_FLAGS)
 
-target/release/xcolor-gui:
+target/release/xcolor-gui: FORCE
 	cargo build --release -p xcolor-gui $(CARGO_FLAGS)
+
+FORCE:
 
 install: target/release/xcolor
 	install -s -D -m755 -- target/release/xcolor "$(DESTDIR)$(PREFIX)/bin/xcolor"

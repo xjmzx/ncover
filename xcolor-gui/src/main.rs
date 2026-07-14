@@ -145,6 +145,11 @@ struct AppData {
     /// it once, which is right: the features it describes are new to them too.
     #[serde(default = "yes")]
     tips: bool,
+    /// Collapsed state per section, so the window comes back the way you left it.
+    #[serde(default = "yes")]
+    open_history: bool,
+    #[serde(default = "yes")]
+    open_palettes: bool,
     /// Have the sample files been written? Set ONCE, on the first run that seeds
     /// them.
     ///
@@ -596,9 +601,9 @@ fn import_palette(window: &ApplicationWindow, shared: &SharedState) {
 /// The image section: open, view, pick a pixel, extract a palette.
 /// The getting-started panel. Each line names a FEATURE and the sample file that
 /// demonstrates it — a tour with nothing to click through is just a wall of text.
-fn build_tips(window: &ApplicationWindow, shared: &SharedState) -> GBox {
+fn build_tips(window: &ApplicationWindow, toggle: &ToggleButton) -> GBox {
     let b = GBox::new(Orientation::Vertical, 6);
-    b.add_css_class("card");
+    b.add_css_class("tips-card");
 
     let head = GBox::new(Orientation::Horizontal, 8);
     let t = Label::new(Some("Getting started"));
@@ -661,19 +666,13 @@ fn build_tips(window: &ApplicationWindow, shared: &SharedState) -> GBox {
             Err(e) => show_error(&window, &format!("Could not write samples: {e}")),
         }
     ));
+    // "Don't show again" un-presses the header toggle rather than hiding the
+    // panel behind its back — one piece of state, so the button in the header
+    // can never disagree with what is on screen.
     close.connect_clicked(clone!(
-        #[strong]
-        shared,
         #[weak]
-        b,
-        move |_| {
-            {
-                let mut s = shared.borrow_mut();
-                s.data.tips = false;
-                let _ = save_data(&s.data);
-            }
-            b.set_visible(false);
-        }
+        toggle,
+        move |_| toggle.set_active(false)
     ));
 
     b
@@ -1701,6 +1700,34 @@ fn write_css(path: &Path, pal: &Palette) -> Result<()> {
 // (no data.json) seeds again, and "Restore samples" is there for a deliberate
 // second chance.
 
+/// GTK4 has a real CSS engine, so the styling lives here rather than being
+/// hand-rolled in draw calls. Selectors, custom classes, spacing, borders — all
+/// of it. Rust is not the constraint; GTK is the toolkit.
+const APP_CSS: &str = "
+  .section-head { font-weight: 700; }
+  .tips-card {
+    background: alpha(@accent_bg_color, 0.10);
+    border: 1px solid alpha(@accent_bg_color, 0.35);
+    border-radius: 10px;
+    padding: 10px;
+  }
+  .tips-card label { font-size: 0.92em; }
+  .canvas-frame { border-radius: 6px; }
+  expander title { padding: 2px 0; }
+";
+
+fn install_css() {
+    let p = gtk::CssProvider::new();
+    p.load_from_data(APP_CSS); // load_from_string is 4.12; we target v4_10
+    if let Some(d) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &d,
+            &p,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+}
+
 fn samples_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -2412,6 +2439,16 @@ fn build_ui(app: &Application) {
     let title = Label::new(Some("XColor Picker"));
     title.add_css_class("title");
     header.set_title_widget(Some(&title));
+
+    // Tips toggle. One control, not two: a button that opens the panel and a
+    // separate toggle that hides it would be two ways to say the same thing, and
+    // they would disagree the moment one of them got out of step. This IS the
+    // `tips` flag — pressed means shown, and "Don't show again" un-presses it.
+    let tips_btn = ToggleButton::new();
+    tips_btn.set_icon_name("help-about-symbolic");
+    tips_btn.set_tooltip_text(Some("Getting started — what this app can do"));
+    header.pack_end(&tips_btn);
+
     window.set_titlebar(Some(&header));
 
     let outer = GBox::new(Orientation::Vertical, 12);
@@ -2464,30 +2501,37 @@ fn build_ui(app: &Application) {
     outer.append(&pick_btn);
 
     // history section
+    // History and Palettes are Expanders now: with the image view alongside, the
+    // left column has more in it than fits, and the answer is to let the user
+    // put away what they are not using.
     let hist_header = GBox::new(Orientation::Horizontal, 8);
     let hist_title = Label::new(Some("History"));
-    hist_title.add_css_class("heading");
+    hist_title.add_css_class("section-head");
     hist_title.set_xalign(0.0);
     hist_title.set_hexpand(true);
     hist_header.append(&hist_title);
     let clear_hist = Button::with_label("Clear");
     hist_header.append(&clear_hist);
-    outer.append(&hist_header);
-
     let history_scroll = gtk::ScrolledWindow::new();
+    history_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     history_scroll.set_min_content_height(120);
-    history_scroll.set_max_content_height(200);
+    history_scroll.set_max_content_height(280);
     history_scroll.set_vexpand(true);
     let history_list = ListBox::new();
     history_list.set_selection_mode(gtk::SelectionMode::None);
     history_list.add_css_class("boxed-list");
     history_scroll.set_child(Some(&history_list));
-    outer.append(&history_scroll);
+
+    hist_header.set_hexpand(true);
+    let hist_exp = gtk::Expander::new(None);
+    hist_exp.set_label_widget(Some(&hist_header));
+    hist_exp.set_child(Some(&history_scroll));
+    outer.append(&hist_exp);
 
     // palettes section
     let pal_header = GBox::new(Orientation::Horizontal, 8);
     let pal_title = Label::new(Some("Palettes"));
-    pal_title.add_css_class("heading");
+    pal_title.add_css_class("section-head");
     pal_title.set_xalign(0.0);
     pal_title.set_hexpand(true);
     pal_header.append(&pal_title);
@@ -2498,17 +2542,21 @@ fn build_ui(app: &Application) {
     pal_header.append(&import_btn);
     let new_pal_btn = Button::with_label("New palette");
     pal_header.append(&new_pal_btn);
-    outer.append(&pal_header);
-
     let pal_scroll = gtk::ScrolledWindow::new();
+    pal_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     pal_scroll.set_min_content_height(140);
-    pal_scroll.set_max_content_height(300);
+    pal_scroll.set_max_content_height(360);
     pal_scroll.set_vexpand(true);
     let palettes_list = ListBox::new();
     palettes_list.set_selection_mode(gtk::SelectionMode::None);
     palettes_list.add_css_class("boxed-list");
     pal_scroll.set_child(Some(&palettes_list));
-    outer.append(&pal_scroll);
+
+    pal_header.set_hexpand(true);
+    let pal_exp = gtk::Expander::new(None);
+    pal_exp.set_label_widget(Some(&pal_header));
+    pal_exp.set_child(Some(&pal_scroll));
+    outer.append(&pal_exp);
 
     // Two columns. A 400x400 image area stacked under the controls turned the
     // window into a ~1100px-tall strip; side by side, the controls keep their
@@ -2575,10 +2623,57 @@ fn build_ui(app: &Application) {
         }
     }
 
-    if shared.borrow().data.tips {
-        let tips = build_tips(&window, &shared);
-        outer.prepend(&tips);
+    // The panel is always built; the toggle decides whether it is on screen. It
+    // used to only exist when `tips` was true, which is exactly why there was no
+    // way back once you dismissed it.
+    let tips = build_tips(&window, &tips_btn);
+    tips.set_visible(shared.borrow().data.tips);
+    outer.prepend(&tips);
+
+    // Section collapse state, restored and persisted. Two identical bindings, so
+    // it is a closure over which field it owns rather than two copies of it.
+    for (exp, get, set) in [
+        (
+            &hist_exp,
+            (|d: &AppData| d.open_history) as fn(&AppData) -> bool,
+            (|d: &mut AppData, v: bool| d.open_history = v) as fn(&mut AppData, bool),
+        ),
+        (
+            &pal_exp,
+            (|d: &AppData| d.open_palettes) as fn(&AppData) -> bool,
+            (|d: &mut AppData, v: bool| d.open_palettes = v) as fn(&mut AppData, bool),
+        ),
+    ] {
+        exp.set_expanded(get(&shared.borrow().data));
+        exp.connect_expanded_notify(clone!(
+            #[strong]
+            shared,
+            move |e| {
+                let mut s = shared.borrow_mut();
+                if get(&s.data) != e.is_expanded() {
+                    set(&mut s.data, e.is_expanded());
+                    let _ = save_data(&s.data);
+                }
+            }
+        ));
     }
+
+    tips_btn.set_active(shared.borrow().data.tips);
+    tips_btn.connect_toggled(clone!(
+        #[strong]
+        shared,
+        #[weak]
+        tips,
+        move |b| {
+            let on = b.is_active();
+            tips.set_visible(on);
+            let mut s = shared.borrow_mut();
+            if s.data.tips != on {
+                s.data.tips = on;
+                let _ = save_data(&s.data);
+            }
+        }
+    ));
 
     image_slot.append(&build_image_view(&window, &shared));
 
@@ -2795,6 +2890,7 @@ fn build_ui(app: &Application) {
 
 fn main() -> glib::ExitCode {
     let app = Application::builder().application_id(APP_ID).build();
+    app.connect_startup(|_| install_css());
     app.connect_activate(build_ui);
     app.run()
 }
