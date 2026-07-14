@@ -582,6 +582,9 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     // the palette button.
     let pixbuf: Rc<RefCell<Option<gdk_pixbuf::Pixbuf>>> = Rc::new(RefCell::new(None));
     let name: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    // Set only for SVG. Its presence is what makes the file's DECLARED colours
+    // available instead of quantised pixels.
+    let svg: Rc<RefCell<Option<SvgInfo>>> = Rc::new(RefCell::new(None));
 
     let box_ = GBox::new(Orientation::Vertical, 8);
 
@@ -715,6 +718,126 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     area.add_controller(click);
     box_.append(&area);
 
+    // Inspect panel — SVG only, and empty otherwise. An SVG states its colours,
+    // fonts and structure; a raster only implies them, so there is nothing
+    // honest to show for a PNG here.
+    let inspect = GBox::new(Orientation::Vertical, 6);
+    let inspect_scroll = gtk::ScrolledWindow::new();
+    inspect_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    inspect_scroll.set_min_content_height(120);
+    inspect_scroll.set_max_content_height(260);
+    inspect_scroll.set_child(Some(&inspect));
+    inspect_scroll.set_visible(false);
+    box_.append(&inspect_scroll);
+
+    let rebuild_inspect = {
+        let svg = svg.clone();
+        let inspect = inspect.clone();
+        let inspect_scroll = inspect_scroll.clone();
+        let shared = shared.clone();
+        let window = window.clone();
+        move || {
+            while let Some(c) = inspect.first_child() {
+                inspect.remove(&c);
+            }
+            let Some(info) = svg.borrow().as_ref().map(clone_info) else {
+                inspect_scroll.set_visible(false);
+                return;
+            };
+            inspect_scroll.set_visible(true);
+
+            let facts = Label::new(Some(&format!(
+                "viewBox {}   ·   {} gradient{}   ·   {}",
+                info.view_box.as_deref().unwrap_or("—"),
+                info.gradients,
+                if info.gradients == 1 { "" } else { "s" },
+                info.elements
+                    .iter()
+                    .take(5)
+                    .map(|(t, n)| format!("{n}×{t}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+            facts.add_css_class("dim-label");
+            facts.set_xalign(0.0);
+            facts.set_wrap(true);
+            inspect.append(&facts);
+
+            if !info.fonts.is_empty() {
+                let l = Label::new(Some(&format!("fonts: {}", info.fonts.join(", "))));
+                l.set_xalign(0.0);
+                l.set_wrap(true);
+                inspect.append(&l);
+            }
+            if !info.texts.is_empty() {
+                let l = Label::new(Some(&format!("text: “{}”", info.texts.join("” “"))));
+                l.set_xalign(0.0);
+                l.set_wrap(true);
+                l.add_css_class("dim-label");
+                inspect.append(&l);
+            }
+
+            if !info.colors.is_empty() {
+                let head = Label::new(Some(&format!(
+                    "{} declared colour{} (click to pick)",
+                    info.colors.len(),
+                    if info.colors.len() == 1 { "" } else { "s" }
+                )));
+                head.set_xalign(0.0);
+                head.add_css_class("dim-label");
+                inspect.append(&head);
+
+                let chips = gtk::FlowBox::new();
+                chips.set_selection_mode(gtk::SelectionMode::None);
+                chips.set_max_children_per_line(12);
+                for (c, n) in info.colors.iter().copied() {
+                    let sw = DrawingArea::new();
+                    sw.set_content_width(28);
+                    sw.set_content_height(28);
+                    sw.set_draw_func(move |_, cr, w, h| {
+                        cr.set_source_rgb(
+                            c.r as f64 / 255.0,
+                            c.g as f64 / 255.0,
+                            c.b as f64 / 255.0,
+                        );
+                        cr.rectangle(0.0, 0.0, w as f64, h as f64);
+                        let _ = cr.fill();
+                    });
+                    sw.set_tooltip_text(Some(&format!(
+                        "{} — used {n}× (declared in the file, not sampled)",
+                        c.hex()
+                    )));
+                    let g = gtk::GestureClick::new();
+                    g.connect_pressed(clone!(
+                        #[strong]
+                        shared,
+                        #[weak]
+                        window,
+                        move |_, _, _, _| {
+                            {
+                                let mut s = shared.borrow_mut();
+                                s.current = Some(c);
+                                s.data.history.retain(|x| *x != c);
+                                s.data.history.insert(0, c);
+                                s.data.history.truncate(HISTORY_LIMIT);
+                                let _ = save_data(&s.data);
+                            }
+                            let s = shared.borrow();
+                            refresh_swatch(&s);
+                            refresh_code(&s);
+                            refresh_history_ui(&s, &window, &shared);
+                            copy_to_clipboard(&window, &c.format(s.data.format));
+                        }
+                    ));
+                    sw.add_controller(g);
+                    chips.append(&sw);
+                }
+                inspect.append(&chips);
+            }
+        }
+    };
+
+    let rebuild_inspect = Rc::new(rebuild_inspect);
     open_btn.connect_clicked(clone!(
         #[weak]
         window,
@@ -722,6 +845,10 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         pixbuf,
         #[strong]
         name,
+        #[strong]
+        svg,
+        #[strong]
+        rebuild_inspect,
         #[weak]
         area,
         #[weak]
@@ -750,6 +877,10 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
                     pixbuf,
                     #[strong]
                     name,
+                    #[strong]
+                    svg,
+                    #[strong]
+                    rebuild_inspect,
                     #[weak]
                     area,
                     #[weak]
@@ -762,11 +893,11 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
                         // SVG has no intrinsic pixel size worth trusting, so
                         // rasterise it big enough to interrogate. PNG/JPEG load
                         // at their own size.
-                        let loaded = if path
+                        let is_svg = path
                             .extension()
                             .and_then(|e| e.to_str())
-                            .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
-                        {
+                            .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+                        let loaded = if is_svg {
                             gdk_pixbuf::Pixbuf::from_file_at_scale(&path, 1024, 1024, true)
                         } else {
                             gdk_pixbuf::Pixbuf::from_file(&path)
@@ -778,16 +909,38 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
                                     .and_then(|s| s.to_str())
                                     .unwrap_or("image")
                                     .to_string();
+                                // An SVG gets read as well as rendered: the
+                                // rasterisation is for looking at, the parse is
+                                // for knowing.
+                                let info = if is_svg {
+                                    fs::read_to_string(&path)
+                                        .ok()
+                                        .and_then(|t| inspect_svg(&t).ok())
+                                } else {
+                                    None
+                                };
                                 file_lbl.set_text(&format!(
                                     "{n}  ·  {}×{}",
                                     pb.width(),
                                     pb.height()
                                 ));
                                 file_lbl.set_tooltip_text(Some(&path.to_string_lossy()));
+                                pal_btn.set_label(if info.is_some() {
+                                    "Palette from SVG"
+                                } else {
+                                    "Palette from image"
+                                });
+                                pal_btn.set_tooltip_text(Some(if info.is_some() {
+                                    "The colours the file DECLARES — exact, not sampled"
+                                } else {
+                                    "The image's dominant colours, quantised from its pixels"
+                                }));
                                 *name.borrow_mut() = n;
                                 *pixbuf.borrow_mut() = Some(pb);
+                                *svg.borrow_mut() = info;
                                 pal_btn.set_sensitive(true);
                                 area.queue_draw();
+                                rebuild_inspect();
                             }
                             Err(e) => show_error(&window, &format!("Could not open: {e}")),
                         }
@@ -805,14 +958,22 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         #[strong]
         name,
         #[strong]
+        svg,
+        #[strong]
         shared,
         move |_| {
             let Some(pb) = pixbuf.borrow().clone() else {
                 return;
             };
-            let colors = dominant_colors(&pb, 12);
+            // An SVG's colours are STATED. Sampling its pixels instead would be
+            // guessing at an answer the file already gives — and would invent
+            // anti-aliased in-between tones that the artwork does not use.
+            let colors: Vec<Rgb> = match svg.borrow().as_ref() {
+                Some(info) => info.colors.iter().map(|(c, _)| *c).collect(),
+                None => dominant_colors(&pb, 12),
+            };
             if colors.is_empty() {
-                show_error(&window, "No opaque pixels to sample.");
+                show_error(&window, "No colours found.");
                 return;
             }
             {
@@ -933,6 +1094,171 @@ fn write_css(path: &Path, pal: &Palette) -> Result<()> {
 /// tool emits a slightly different dialect. We need three ints; a hex column
 /// and a name are both optional, and anything after the hex is the name (GIMP's
 /// own convention, and what `write_gpl` emits).
+// ---------- SVG introspection ----------
+//
+// An SVG *states* its colours; a PNG only implies them. So for an SVG we do not
+// sample pixels and guess — we read the declared fills, strokes and gradient
+// stops out of the file. That is the difference between "roughly these tones"
+// and "these exact values, and here is where each one is used".
+//
+// Also surfaced: the fonts it asks for, the text it contains, and what it is
+// made of. For label art that is most of what you want to know before you touch
+// anything.
+
+#[derive(Default, Debug, Clone)]
+struct SvgInfo {
+    view_box: Option<String>,
+    width: Option<String>,
+    height: Option<String>,
+    /// Element tag -> count, most common first.
+    elements: Vec<(String, usize)>,
+    /// font-family values, in first-seen order.
+    fonts: Vec<String>,
+    /// The actual text content — for label art, this is the copy.
+    texts: Vec<String>,
+    gradients: usize,
+    /// Declared colours, most-used first, with a use count.
+    colors: Vec<(Rgb, usize)>,
+}
+
+fn clone_info(i: &SvgInfo) -> SvgInfo {
+    i.clone()
+}
+
+/// CSS named colours we bother with. A full table is 148 entries and mostly
+/// noise; these are the ones that actually show up in exported SVG.
+fn named_color(s: &str) -> Option<Rgb> {
+    Some(match s {
+        "black" => Rgb { r: 0, g: 0, b: 0 },
+        "white" => Rgb { r: 255, g: 255, b: 255 },
+        "red" => Rgb { r: 255, g: 0, b: 0 },
+        "lime" | "green" => Rgb { r: 0, g: 128, b: 0 },
+        "blue" => Rgb { r: 0, g: 0, b: 255 },
+        "yellow" => Rgb { r: 255, g: 255, b: 0 },
+        "cyan" | "aqua" => Rgb { r: 0, g: 255, b: 255 },
+        "magenta" | "fuchsia" => Rgb { r: 255, g: 0, b: 255 },
+        "gray" | "grey" => Rgb { r: 128, g: 128, b: 128 },
+        "silver" => Rgb { r: 192, g: 192, b: 192 },
+        "orange" => Rgb { r: 255, g: 165, b: 0 },
+        _ => return None,
+    })
+}
+
+/// Parse one colour token. Handles `#rgb`, `#rrggbb`, `rgb(r,g,b)` and the
+/// common named colours. `none`, `currentColor` and `url(#grad)` are NOT
+/// colours — they are references or absences, and inventing a value for them
+/// would put a colour in the palette that the file never declares.
+fn parse_svg_color(v: &str) -> Option<Rgb> {
+    let v = v.trim();
+    if v.is_empty() || v.eq_ignore_ascii_case("none") || v.starts_with("url(") {
+        return None;
+    }
+    if let Some(hex) = v.strip_prefix('#') {
+        if hex.len() == 3 {
+            let f = |c: char| c.to_digit(16).map(|d| (d * 17) as u8);
+            let mut it = hex.chars();
+            return Some(Rgb {
+                r: f(it.next()?)?,
+                g: f(it.next()?)?,
+                b: f(it.next()?)?,
+            });
+        }
+        return Rgb::from_hex(v);
+    }
+    if let Some(inner) = v.strip_prefix("rgb(").and_then(|x| x.strip_suffix(')')) {
+        let parts: Vec<u8> = inner
+            .split(',')
+            .filter_map(|p| p.trim().parse::<u8>().ok())
+            .collect();
+        if parts.len() == 3 {
+            return Some(Rgb { r: parts[0], g: parts[1], b: parts[2] });
+        }
+    }
+    named_color(&v.to_ascii_lowercase())
+}
+
+/// Pull colour tokens out of a `style="fill:#abc;stroke:red"` attribute.
+fn colors_in_style(style: &str, out: &mut Vec<Rgb>) {
+    for decl in style.split(';') {
+        let Some((k, v)) = decl.split_once(':') else { continue };
+        let k = k.trim();
+        if k == "fill" || k == "stroke" || k == "stop-color" || k == "flood-color" {
+            if let Some(c) = parse_svg_color(v) {
+                out.push(c);
+            }
+        }
+    }
+}
+
+fn inspect_svg(text: &str) -> Result<SvgInfo> {
+    let doc = roxmltree::Document::parse(text).context("not valid XML/SVG")?;
+    let root = doc.root_element();
+
+    let mut info = SvgInfo {
+        view_box: root.attribute("viewBox").map(str::to_string),
+        width: root.attribute("width").map(str::to_string),
+        height: root.attribute("height").map(str::to_string),
+        ..Default::default()
+    };
+
+    let mut tags: HashMap<String, usize> = HashMap::new();
+    let mut counts: HashMap<Rgb, usize> = HashMap::new();
+
+    for node in doc.descendants().filter(|n| n.is_element()) {
+        let tag = node.tag_name().name().to_string();
+        *tags.entry(tag.clone()).or_insert(0) += 1;
+        if tag.ends_with("Gradient") {
+            info.gradients += 1;
+        }
+
+        let mut found: Vec<Rgb> = Vec::new();
+        for a in ["fill", "stroke", "stop-color", "flood-color"] {
+            if let Some(c) = node.attribute(a).and_then(parse_svg_color) {
+                found.push(c);
+            }
+        }
+        if let Some(st) = node.attribute("style") {
+            colors_in_style(st, &mut found);
+        }
+        for c in found {
+            *counts.entry(c).or_insert(0) += 1;
+        }
+
+        if let Some(f) = node.attribute("font-family") {
+            let f = f.trim().trim_matches('\'').trim_matches('"').to_string();
+            if !f.is_empty() && !info.fonts.contains(&f) {
+                info.fonts.push(f);
+            }
+        }
+        if tag == "text" || tag == "tspan" {
+            // ONLY text nodes. descendants() includes the node itself, and an
+            // *element*'s .text() returns its first text child — so filtering on
+            // .text() alone collects the same string twice.
+            let t: String = node
+                .descendants()
+                .filter(|n| n.is_text())
+                .filter_map(|n| n.text())
+                .collect::<String>()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !t.is_empty() && !info.texts.contains(&t) {
+                info.texts.push(t);
+            }
+        }
+    }
+
+    let mut el: Vec<(String, usize)> = tags.into_iter().collect();
+    el.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    info.elements = el;
+
+    let mut cs: Vec<(Rgb, usize)> = counts.into_iter().collect();
+    cs.sort_by(|a, b| b.1.cmp(&a.1));
+    info.colors = cs;
+
+    Ok(info)
+}
+
 /// Where the image is actually drawn inside the widget: fit to the box,
 /// preserve aspect, centre. Returned so a click can be mapped back to a pixel —
 /// the draw and the hit-test MUST agree, so they share this one function rather
@@ -1561,5 +1887,61 @@ mod image_tests {
             let iy = ((py - oy) / scale).floor();
             assert_eq!((ix, iy), (tx, ty), "pixel ({tx},{ty}) did not round-trip");
         }
+    }
+}
+
+#[cfg(test)]
+mod svg_tests {
+    use super::*;
+
+    const SAMPLE: &str = r##"<svg viewBox="0 0 100 50" width="100" height="50">
+      <defs><linearGradient id="g">
+        <stop offset="0" stop-color="#ff0000"/>
+        <stop offset="1" stop-color="rgb(0, 0, 255)"/>
+      </linearGradient></defs>
+      <rect fill="#abc" stroke="black" x="0" y="0"/>
+      <rect fill="url(#g)"/>
+      <path fill="none" stroke="#ff0000"/>
+      <text font-family="Helvetica" fill="white">Label Art</text>
+    </svg>"##;
+
+    #[test]
+    fn reads_the_declared_colours_not_the_pixels() {
+        let i = inspect_svg(SAMPLE).unwrap();
+        let hexes: Vec<String> = i.colors.iter().map(|(c, _)| c.hex()).collect();
+        assert!(hexes.contains(&"#FF0000".to_string())); // stop-color + stroke
+        assert!(hexes.contains(&"#0000FF".to_string())); // rgb(...) form
+        assert!(hexes.contains(&"#AABBCC".to_string())); // #abc shorthand expands
+        assert!(hexes.contains(&"#000000".to_string())); // named "black"
+        assert!(hexes.contains(&"#FFFFFF".to_string())); // named "white"
+        // #ff0000 is used twice (a stop and a stroke) and must rank first.
+        assert_eq!(i.colors[0].0.hex(), "#FF0000");
+    }
+
+    #[test]
+    fn none_and_url_refs_are_not_colours() {
+        // Inventing a value for `none` or `url(#grad)` would put a colour in the
+        // palette that the file never declares.
+        assert!(parse_svg_color("none").is_none());
+        assert!(parse_svg_color("url(#g)").is_none());
+        assert!(parse_svg_color("currentColor").is_none());
+    }
+
+    #[test]
+    fn reads_fonts_text_and_structure() {
+        let i = inspect_svg(SAMPLE).unwrap();
+        assert_eq!(i.fonts, vec!["Helvetica"]);
+        assert_eq!(i.texts, vec!["Label Art"]);
+        assert_eq!(i.gradients, 1);
+        assert_eq!(i.view_box.as_deref(), Some("0 0 100 50"));
+        assert_eq!(i.elements.iter().find(|(t, _)| t == "rect").unwrap().1, 2);
+    }
+
+    #[test]
+    fn a_style_attribute_is_read_too() {
+        let d = r#"<svg><rect style="fill:#123456;stroke:none"/></svg>"#;
+        let i = inspect_svg(d).unwrap();
+        assert_eq!(i.colors.len(), 1);
+        assert_eq!(i.colors[0].0.hex(), "#123456");
     }
 }
