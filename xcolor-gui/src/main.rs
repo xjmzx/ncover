@@ -585,6 +585,10 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     // Set only for SVG. Its presence is what makes the file's DECLARED colours
     // available instead of quantised pixels.
     let svg: Rc<RefCell<Option<SvgInfo>>> = Rc::new(RefCell::new(None));
+    // The templated result, when one has been applied. The area draws this in
+    // preference to the source, so the disc IS the preview — you are looking at
+    // the thing you would save, not an approximation of it.
+    let out: Rc<RefCell<Option<gdk_pixbuf::Pixbuf>>> = Rc::new(RefCell::new(None));
 
     let box_ = GBox::new(Orientation::Vertical, 8);
 
@@ -624,6 +628,8 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     area.set_draw_func(clone!(
         #[strong]
         pixbuf,
+        #[strong]
+        out,
         move |_, cr, w, h| {
             let (w, h) = (w as f64, h as f64);
 
@@ -646,7 +652,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
             }
             let _ = cr.fill();
 
-            let Some(pb) = pixbuf.borrow().clone() else {
+            let Some(pb) = out.borrow().clone().or_else(|| pixbuf.borrow().clone()) else {
                 return;
             };
             let (ox, oy, scale) =
@@ -672,13 +678,17 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         #[strong]
         pixbuf,
         #[strong]
+        out,
+        #[strong]
         shared,
         #[weak]
         window,
         #[weak]
         area,
         move |_, _, px, py| {
-            let Some(pb) = pixbuf.borrow().clone() else {
+            // Pick from what is on screen — if a template is applied, that is
+            // the image, and picking the source underneath would be a lie.
+            let Some(pb) = out.borrow().clone().or_else(|| pixbuf.borrow().clone()) else {
                 return;
             };
             let (w, h) = (area.width() as f64, area.height() as f64);
@@ -729,6 +739,139 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     inspect_scroll.set_child(Some(&inspect));
     inspect_scroll.set_visible(false);
     box_.append(&inspect_scroll);
+
+    // ---- Template row ------------------------------------------------------
+    // Disc mask with four corner treatments. Solid/Gradient take their colours
+    // from what you have already picked — the palettes ARE the input, which is
+    // the whole reason this lives in a colour tool rather than an image editor.
+    let tpl = GBox::new(Orientation::Horizontal, 6);
+    let tpl_lbl = Label::new(Some("Disc"));
+    tpl_lbl.add_css_class("dim-label");
+    tpl.append(&tpl_lbl);
+
+    let b_alpha = Button::with_label("Alpha");
+    b_alpha.set_tooltip_text(Some("Corners transparent — the honest default for artwork on an unknown background"));
+    let b_white = Button::with_label("White");
+    let b_solid = Button::with_label("Colour");
+    b_solid.set_tooltip_text(Some("Corners filled with the CURRENT colour"));
+    let b_grad = Button::with_label("Gradient");
+    b_grad.set_tooltip_text(Some(
+        "Radial from the rim outward: current colour at the rim, the previous pick at the corners",
+    ));
+    let b_reset = Button::with_label("Reset");
+    b_reset.set_tooltip_text(Some("Back to the original image"));
+    let b_save = Button::with_label("Save PNG…");
+    b_save.set_sensitive(false);
+
+    for b in [&b_alpha, &b_white, &b_solid, &b_grad, &b_reset, &b_save] {
+        b.set_sensitive(false);
+        tpl.append(b);
+    }
+    tpl.set_visible(false);
+    box_.append(&tpl);
+
+    let apply = {
+        let pixbuf = pixbuf.clone();
+        let out = out.clone();
+        let shared = shared.clone();
+        let area = area.clone();
+        let window = window.clone();
+        let b_save = b_save.clone();
+        Rc::new(move |fill_kind: u8| {
+            let Some(src) = pixbuf.borrow().clone() else { return };
+            let (cur, prev) = {
+                let s = shared.borrow();
+                (
+                    s.current.or_else(|| s.data.history.first().copied()),
+                    s.data.history.get(1).copied().or(s.current),
+                )
+            };
+            let fill = match fill_kind {
+                0 => OuterFill::Alpha,
+                1 => OuterFill::White,
+                2 => match cur {
+                    Some(c) => OuterFill::Solid(c),
+                    None => {
+                        show_error(&window, "Pick a colour first — that is the fill.");
+                        return;
+                    }
+                },
+                _ => match (cur, prev) {
+                    (Some(i), Some(o)) => OuterFill::Gradient { inner: i, outer: o },
+                    _ => {
+                        show_error(
+                            &window,
+                            "A gradient needs two colours — pick a second one.",
+                        );
+                        return;
+                    }
+                },
+            };
+            match disc_template(&src, fill) {
+                Ok(pb) => {
+                    *out.borrow_mut() = Some(pb);
+                    b_save.set_sensitive(true);
+                    area.queue_draw();
+                }
+                Err(e) => show_error(&window, &format!("Template failed: {e}")),
+            }
+        })
+    };
+
+    for (b, kind) in [(&b_alpha, 0u8), (&b_white, 1), (&b_solid, 2), (&b_grad, 3)] {
+        let apply = apply.clone();
+        b.connect_clicked(move |_| apply(kind));
+    }
+    b_reset.connect_clicked(clone!(
+        #[strong]
+        out,
+        #[weak]
+        area,
+        #[weak]
+        b_save,
+        move |_| {
+            *out.borrow_mut() = None;
+            b_save.set_sensitive(false);
+            area.queue_draw();
+        }
+    ));
+    b_save.connect_clicked(clone!(
+        #[weak]
+        window,
+        #[strong]
+        out,
+        #[strong]
+        name,
+        move |_| {
+            let Some(pb) = out.borrow().clone() else { return };
+            let stem = name
+                .borrow()
+                .rsplit_once('.')
+                .map(|(a, _)| a.to_string())
+                .unwrap_or_else(|| name.borrow().clone());
+            let dlg = gtk::FileDialog::builder()
+                .title("Save disc")
+                .initial_name(format!("{stem}-disc.png"))
+                .build();
+            dlg.save(
+                Some(&window),
+                gio::Cancellable::NONE,
+                clone!(
+                    #[weak]
+                    window,
+                    move |res| {
+                        let Ok(file) = res else { return };
+                        let Some(path) = file.path() else { return };
+                        // Always PNG: the mask's whole point is alpha, and JPEG
+                        // has none.
+                        if let Err(e) = pb.savev(&path, "png", &[]) {
+                            show_error(&window, &format!("Save failed: {e}"));
+                        }
+                    }
+                ),
+            );
+        }
+    ));
 
     let rebuild_inspect = {
         let svg = svg.clone();
@@ -848,6 +991,22 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         #[strong]
         svg,
         #[strong]
+        out,
+        #[weak]
+        tpl,
+        #[weak]
+        b_alpha,
+        #[weak]
+        b_white,
+        #[weak]
+        b_solid,
+        #[weak]
+        b_grad,
+        #[weak]
+        b_reset,
+        #[weak]
+        b_save,
+        #[strong]
         rebuild_inspect,
         #[weak]
         area,
@@ -879,6 +1038,22 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
                     name,
                     #[strong]
                     svg,
+                    #[strong]
+                    out,
+                    #[weak]
+                    tpl,
+                    #[weak]
+                    b_alpha,
+                    #[weak]
+                    b_white,
+                    #[weak]
+                    b_solid,
+                    #[weak]
+                    b_grad,
+                    #[weak]
+                    b_reset,
+                    #[weak]
+                    b_save,
                     #[strong]
                     rebuild_inspect,
                     #[weak]
@@ -938,7 +1113,13 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
                                 *name.borrow_mut() = n;
                                 *pixbuf.borrow_mut() = Some(pb);
                                 *svg.borrow_mut() = info;
+                                *out.borrow_mut() = None; // a new image drops any old template
                                 pal_btn.set_sensitive(true);
+                                tpl.set_visible(true);
+                                for b in [&b_alpha, &b_white, &b_solid, &b_grad, &b_reset] {
+                                    b.set_sensitive(true);
+                                }
+                                b_save.set_sensitive(false);
                                 area.queue_draw();
                                 rebuild_inspect();
                             }
@@ -1094,6 +1275,140 @@ fn write_css(path: &Path, pal: &Palette) -> Result<()> {
 /// tool emits a slightly different dialect. We need three ints; a hex column
 /// and a name are both optional, and anything after the hex is the name (GIMP's
 /// own convention, and what `write_gpl` emits).
+// ---------- disc template ----------
+//
+// Mask artwork into a disc — a record label, a CD face — with the corners left
+// as one of four things. Done as plain pixel work rather than a cairo round
+// trip: the alpha handling is the whole point, and it is easier to be exact
+// about it than to un-premultiply someone else's surface.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OuterFill {
+    /// The corners are simply not there. The honest default for artwork that
+    /// will sit on an unknown background.
+    Alpha,
+    White,
+    Solid(Rgb),
+    /// Radial, from the disc's edge outward: `inner` at the rim, `outer` at the
+    /// corners.
+    Gradient { inner: Rgb, outer: Rgb },
+}
+
+fn lerp(a: u8, b: u8, t: f64) -> u8 {
+    (a as f64 + (b as f64 - a as f64) * t).round().clamp(0.0, 255.0) as u8
+}
+
+/// Nearest-neighbour sample. A colour tool must not invent colours, and bilinear
+/// would blend two swatches into a third that is in neither.
+fn sample(pb: &gdk_pixbuf::Pixbuf, bytes: &[u8], x: i32, y: i32) -> (u8, u8, u8, u8) {
+    let x = x.clamp(0, pb.width() - 1) as usize;
+    let y = y.clamp(0, pb.height() - 1) as usize;
+    let nch = pb.n_channels() as usize;
+    let i = y * pb.rowstride() as usize + x * nch;
+    if i + nch > bytes.len() {
+        return (0, 0, 0, 0);
+    }
+    (
+        bytes[i],
+        bytes[i + 1],
+        bytes[i + 2],
+        if pb.has_alpha() { bytes[i + 3] } else { 255 },
+    )
+}
+
+/// Mask `src` into a disc inscribed in a square canvas, filling the corners
+/// per `fill`.
+///
+/// The source is scaled to COVER the square (never letterboxed — a disc with
+/// bars through it is not a disc), and the rim is antialiased over one pixel so
+/// the edge does not read as a staircase.
+fn disc_template(src: &gdk_pixbuf::Pixbuf, fill: OuterFill) -> Result<gdk_pixbuf::Pixbuf> {
+    let (sw, sh) = (src.width(), src.height());
+    if sw == 0 || sh == 0 {
+        anyhow::bail!("empty image");
+    }
+    let size = sw.max(sh);
+    let sbytes = unsafe { src.pixels() };
+
+    let dst = gdk_pixbuf::Pixbuf::new(
+        gdk_pixbuf::Colorspace::Rgb,
+        true, // always RGBA out: Alpha fill needs it, and the others cost nothing
+        8,
+        size,
+        size,
+    )
+    .context("could not allocate the output image")?;
+    let drow = dst.rowstride() as usize;
+    let dbytes = unsafe { dst.pixels() };
+
+    let cx = size as f64 / 2.0;
+    let cy = size as f64 / 2.0;
+    let radius = size as f64 / 2.0;
+    // Cover: the smaller source axis must reach across the square.
+    let scale = size as f64 / sw.min(sh) as f64;
+    // Gradient normalisation: distance to the furthest PIXEL CENTRE, not to the
+    // abstract corner. A pixel's centre is half a pixel inside the corner, so
+    // normalising to the corner leaves the corner pixel short of the outer stop
+    // (94.7% on a 64px canvas — ask for black->white and the corner comes out
+    // #F1F1F1). The furthest thing that actually gets drawn should reach the
+    // end of the ramp.
+    let corner = ((cx - 0.5).powi(2) + (cy - 0.5).powi(2)).sqrt();
+
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x as f64 + 0.5 - cx;
+            let dy = y as f64 + 0.5 - cy;
+            let dist = (dx * dx + dy * dy).sqrt();
+
+            // Coverage: 1 inside, 0 outside, ramped across the last pixel.
+            let cov = ((radius - dist) + 0.5).clamp(0.0, 1.0);
+
+            // Source pixel under this destination pixel (cover-scaled, centred).
+            let sx = ((x as f64 - cx) / scale + sw as f64 / 2.0).floor() as i32;
+            let sy = ((y as f64 - cy) / scale + sh as f64 / 2.0).floor() as i32;
+            let (ir, ig, ib, ia) = sample(src, sbytes, sx, sy);
+
+            let (or_, og, ob, oa) = match fill {
+                OuterFill::Alpha => (0, 0, 0, 0),
+                OuterFill::White => (255, 255, 255, 255),
+                OuterFill::Solid(c) => (c.r, c.g, c.b, 255),
+                OuterFill::Gradient { inner, outer } => {
+                    let t = ((dist - radius) / (corner - radius)).clamp(0.0, 1.0);
+                    (
+                        lerp(inner.r, outer.r, t),
+                        lerp(inner.g, outer.g, t),
+                        lerp(inner.b, outer.b, t),
+                        255,
+                    )
+                }
+            };
+
+            // Composite the disc over the corner fill by coverage.
+            let i = y as usize * drow + x as usize * 4;
+            let a_in = ia as f64 / 255.0 * cov;
+            let a_out = oa as f64 / 255.0 * (1.0 - cov);
+            let a = a_in + a_out;
+            if a <= 0.0 {
+                dbytes[i] = 0;
+                dbytes[i + 1] = 0;
+                dbytes[i + 2] = 0;
+                dbytes[i + 3] = 0;
+                continue;
+            }
+            let mix = |inside: u8, outside: u8| -> u8 {
+                (((inside as f64 * a_in) + (outside as f64 * a_out)) / a)
+                    .round()
+                    .clamp(0.0, 255.0) as u8
+            };
+            dbytes[i] = mix(ir, or_);
+            dbytes[i + 1] = mix(ig, og);
+            dbytes[i + 2] = mix(ib, ob);
+            dbytes[i + 3] = (a * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    Ok(dst)
+}
+
 // ---------- SVG introspection ----------
 //
 // An SVG *states* its colours; a PNG only implies them. So for an SVG we do not
@@ -1943,5 +2258,82 @@ mod svg_tests {
         let i = inspect_svg(d).unwrap();
         assert_eq!(i.colors.len(), 1);
         assert_eq!(i.colors[0].0.hex(), "#123456");
+    }
+}
+
+#[cfg(test)]
+mod disc_tests {
+    use super::*;
+
+    /// A solid red square, `n`×`n`, fully opaque.
+    fn red(n: i32) -> gdk_pixbuf::Pixbuf {
+        let pb = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, true, 8, n, n).unwrap();
+        pb.fill(0xFF0000FF);
+        pb
+    }
+
+    fn px(pb: &gdk_pixbuf::Pixbuf, x: i32, y: i32) -> (u8, u8, u8, u8) {
+        let b = unsafe { pb.pixels() };
+        let i = y as usize * pb.rowstride() as usize + x as usize * 4;
+        (b[i], b[i + 1], b[i + 2], b[i + 3])
+    }
+
+    #[test]
+    fn alpha_fill_leaves_the_corners_actually_transparent() {
+        let out = disc_template(&red(64), OuterFill::Alpha).unwrap();
+        assert_eq!(px(&out, 0, 0).3, 0, "corner must be fully transparent");
+        assert_eq!(px(&out, 32, 32), (255, 0, 0, 255), "centre is the artwork");
+    }
+
+    #[test]
+    fn white_fill_puts_white_in_the_corners_not_transparency() {
+        let out = disc_template(&red(64), OuterFill::White).unwrap();
+        assert_eq!(px(&out, 0, 0), (255, 255, 255, 255));
+        assert_eq!(px(&out, 32, 32), (255, 0, 0, 255));
+    }
+
+    #[test]
+    fn solid_fill_uses_the_colour_given() {
+        let blue = Rgb { r: 0, g: 0, b: 255 };
+        let out = disc_template(&red(64), OuterFill::Solid(blue)).unwrap();
+        assert_eq!(px(&out, 0, 0), (0, 0, 255, 255));
+    }
+
+    #[test]
+    fn gradient_runs_from_the_rim_outward() {
+        // inner (at the rim) -> outer (at the corner).
+        let out = disc_template(
+            &red(64),
+            OuterFill::Gradient {
+                inner: Rgb { r: 0, g: 0, b: 0 },
+                outer: Rgb { r: 255, g: 255, b: 255 },
+            },
+        )
+        .unwrap();
+        let corner = px(&out, 0, 0);
+        assert_eq!(corner, (255, 255, 255, 255), "corner is the OUTER stop");
+
+        // NB an INSCRIBED disc touches the canvas edges, so there is no "outside"
+        // at the mid-edge — pixel (63,32) IS the rim. The fill only exists in the
+        // four corners. Sample along the diagonal, just outside the rim: it must
+        // still be near the INNER stop.
+        let near_rim = px(&out, 6, 6);
+        assert!(
+            near_rim.0 < 128,
+            "just past the rim should be near the inner stop, got {near_rim:?}"
+        );
+    }
+
+    #[test]
+    fn a_non_square_source_is_covered_not_letterboxed() {
+        // A disc with bars through it is not a disc. A 128x64 source must fill
+        // the square canvas, cropping the long axis rather than padding.
+        let wide = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, true, 8, 128, 64).unwrap();
+        wide.fill(0x00FF00FF);
+        let out = disc_template(&wide, OuterFill::Alpha).unwrap();
+        assert_eq!(out.width(), 128);
+        assert_eq!(out.height(), 128);
+        // Top-centre is inside the disc and must be artwork, not padding.
+        assert_eq!(px(&out, 64, 4), (0, 255, 0, 255));
     }
 }
