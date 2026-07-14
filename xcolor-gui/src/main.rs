@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -7,6 +8,7 @@ use anyhow::{Context, Result};
 use gio::prelude::*;
 use gtk::glib::clone;
 use gtk::prelude::*;
+use gtk::gdk_pixbuf;
 use gtk::{
     glib, Application, ApplicationWindow, Box as GBox, Button, DrawingArea, Entry, HeaderBar,
     Label, ListBox, Orientation, Separator, ToggleButton,
@@ -574,6 +576,261 @@ fn import_palette(window: &ApplicationWindow, shared: &SharedState) {
     );
 }
 
+/// The image section: open, view, pick a pixel, extract a palette.
+fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
+    // The loaded image, shared between the draw handler, the click handler and
+    // the palette button.
+    let pixbuf: Rc<RefCell<Option<gdk_pixbuf::Pixbuf>>> = Rc::new(RefCell::new(None));
+    let name: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+
+    let box_ = GBox::new(Orientation::Vertical, 8);
+
+    let header = GBox::new(Orientation::Horizontal, 8);
+    let title = Label::new(Some("Image"));
+    title.add_css_class("heading");
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    header.append(&title);
+
+    let file_lbl = Label::new(Some("no image"));
+    file_lbl.add_css_class("dim-label");
+    file_lbl.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    file_lbl.set_max_width_chars(28);
+    header.append(&file_lbl);
+
+    let open_btn = Button::with_label("Open");
+    open_btn.set_tooltip_text(Some("Open an image (PNG / SVG / JPEG)"));
+    header.append(&open_btn);
+
+    let pal_btn = Button::with_label("Palette from image");
+    pal_btn.set_tooltip_text(Some(
+        "Extract the image's dominant colours as a new palette",
+    ));
+    pal_btn.set_sensitive(false);
+    header.append(&pal_btn);
+    box_.append(&header);
+
+    // 400x400 is the floor, not the size — it expands with the window.
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(400);
+    area.set_content_height(400);
+    area.set_hexpand(true);
+    area.set_vexpand(true);
+    area.add_css_class("frame");
+
+    area.set_draw_func(clone!(
+        #[strong]
+        pixbuf,
+        move |_, cr, w, h| {
+            let (w, h) = (w as f64, h as f64);
+
+            // Checkerboard: what is transparent must LOOK transparent, or a
+            // white logo on nothing reads as a white logo on white.
+            let sq = 12.0;
+            cr.set_source_rgb(0.16, 0.16, 0.17);
+            let _ = cr.paint();
+            cr.set_source_rgb(0.21, 0.21, 0.22);
+            let mut y = 0.0;
+            let mut row = 0;
+            while y < h {
+                let mut x = if row % 2 == 0 { 0.0 } else { sq };
+                while x < w {
+                    cr.rectangle(x, y, sq, sq);
+                    x += sq * 2.0;
+                }
+                y += sq;
+                row += 1;
+            }
+            let _ = cr.fill();
+
+            let Some(pb) = pixbuf.borrow().clone() else {
+                return;
+            };
+            let (ox, oy, scale) =
+                fitted(pb.width() as f64, pb.height() as f64, w, h);
+            cr.save().ok();
+            cr.translate(ox, oy);
+            cr.scale(scale, scale);
+            cr.set_source_pixbuf(&pb, 0.0, 0.0);
+            // Nearest-neighbour when magnified: this is a colour tool, and
+            // smoothing invents colours that are not in the file.
+            if scale > 1.0 {
+                cr.source().set_filter(gtk::cairo::Filter::Nearest);
+            }
+            let _ = cr.paint();
+            cr.restore().ok();
+        }
+    ));
+
+    // Click a pixel -> it becomes the current colour, exactly as a screen pick
+    // does, so it flows into the history and the palettes.
+    let click = gtk::GestureClick::new();
+    click.connect_pressed(clone!(
+        #[strong]
+        pixbuf,
+        #[strong]
+        shared,
+        #[weak]
+        window,
+        #[weak]
+        area,
+        move |_, _, px, py| {
+            let Some(pb) = pixbuf.borrow().clone() else {
+                return;
+            };
+            let (w, h) = (area.width() as f64, area.height() as f64);
+            let (ox, oy, scale) = fitted(pb.width() as f64, pb.height() as f64, w, h);
+            let ix = ((px - ox) / scale).floor();
+            let iy = ((py - oy) / scale).floor();
+            if ix < 0.0 || iy < 0.0 || ix >= pb.width() as f64 || iy >= pb.height() as f64 {
+                return; // clicked the checkerboard, not the image
+            }
+            let nch = pb.n_channels() as usize;
+            let i = iy as usize * pb.rowstride() as usize + ix as usize * nch;
+            let bytes = unsafe { pb.pixels() };
+            if i + 3 > bytes.len() {
+                return;
+            }
+            let c = Rgb {
+                r: bytes[i],
+                g: bytes[i + 1],
+                b: bytes[i + 2],
+            };
+            {
+                let mut s = shared.borrow_mut();
+                s.current = Some(c);
+                // Identical to the screen picker's path — a pick is a pick.
+                s.data.history.retain(|x| *x != c);
+                s.data.history.insert(0, c);
+                s.data.history.truncate(HISTORY_LIMIT);
+                let _ = save_data(&s.data);
+            }
+            let s = shared.borrow();
+            refresh_swatch(&s);
+            refresh_code(&s);
+            refresh_history_ui(&s, &window, &shared);
+            copy_to_clipboard(&window, &c.format(s.data.format));
+        }
+    ));
+    area.add_controller(click);
+    box_.append(&area);
+
+    open_btn.connect_clicked(clone!(
+        #[weak]
+        window,
+        #[strong]
+        pixbuf,
+        #[strong]
+        name,
+        #[weak]
+        area,
+        #[weak]
+        file_lbl,
+        #[weak]
+        pal_btn,
+        move |_| {
+            let filter = gtk::FileFilter::new();
+            filter.set_name(Some("Images (PNG / SVG / JPEG)"));
+            for p in ["*.png", "*.svg", "*.jpg", "*.jpeg", "*.webp"] {
+                filter.add_pattern(p);
+            }
+            let filters = gio::ListStore::new::<gtk::FileFilter>();
+            filters.append(&filter);
+            let dlg = gtk::FileDialog::builder()
+                .title("Open image")
+                .filters(&filters)
+                .build();
+            dlg.open(
+                Some(&window),
+                gio::Cancellable::NONE,
+                clone!(
+                    #[weak]
+                    window,
+                    #[strong]
+                    pixbuf,
+                    #[strong]
+                    name,
+                    #[weak]
+                    area,
+                    #[weak]
+                    file_lbl,
+                    #[weak]
+                    pal_btn,
+                    move |res| {
+                        let Ok(file) = res else { return };
+                        let Some(path) = file.path() else { return };
+                        // SVG has no intrinsic pixel size worth trusting, so
+                        // rasterise it big enough to interrogate. PNG/JPEG load
+                        // at their own size.
+                        let loaded = if path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
+                        {
+                            gdk_pixbuf::Pixbuf::from_file_at_scale(&path, 1024, 1024, true)
+                        } else {
+                            gdk_pixbuf::Pixbuf::from_file(&path)
+                        };
+                        match loaded {
+                            Ok(pb) => {
+                                let n = path
+                                    .file_name()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("image")
+                                    .to_string();
+                                file_lbl.set_text(&format!(
+                                    "{n}  ·  {}×{}",
+                                    pb.width(),
+                                    pb.height()
+                                ));
+                                file_lbl.set_tooltip_text(Some(&path.to_string_lossy()));
+                                *name.borrow_mut() = n;
+                                *pixbuf.borrow_mut() = Some(pb);
+                                pal_btn.set_sensitive(true);
+                                area.queue_draw();
+                            }
+                            Err(e) => show_error(&window, &format!("Could not open: {e}")),
+                        }
+                    }
+                ),
+            );
+        }
+    ));
+
+    pal_btn.connect_clicked(clone!(
+        #[weak]
+        window,
+        #[strong]
+        pixbuf,
+        #[strong]
+        name,
+        #[strong]
+        shared,
+        move |_| {
+            let Some(pb) = pixbuf.borrow().clone() else {
+                return;
+            };
+            let colors = dominant_colors(&pb, 12);
+            if colors.is_empty() {
+                show_error(&window, "No opaque pixels to sample.");
+                return;
+            }
+            {
+                let mut s = shared.borrow_mut();
+                s.data.palettes.push(Palette {
+                    name: name.borrow().clone(),
+                    colors: colors.into_iter().map(Swatch::new).collect(),
+                });
+                let _ = save_data(&s.data);
+            }
+            let s = shared.borrow();
+            refresh_palettes_ui(&s, &window, &shared);
+        }
+    ));
+
+    box_
+}
+
 fn export_palette(window: &ApplicationWindow, shared: &SharedState, idx: usize) {
     let pal = match shared.borrow().data.palettes.get(idx).cloned() {
         Some(p) => p,
@@ -676,6 +933,92 @@ fn write_css(path: &Path, pal: &Palette) -> Result<()> {
 /// tool emits a slightly different dialect. We need three ints; a hex column
 /// and a name are both optional, and anything after the hex is the name (GIMP's
 /// own convention, and what `write_gpl` emits).
+/// Where the image is actually drawn inside the widget: fit to the box,
+/// preserve aspect, centre. Returned so a click can be mapped back to a pixel —
+/// the draw and the hit-test MUST agree, so they share this one function rather
+/// than each doing their own arithmetic.
+fn fitted(pw: f64, ph: f64, ww: f64, wh: f64) -> (f64, f64, f64) {
+    let scale = (ww / pw).min(wh / ph).min(8.0); // don't magnify past 8x
+    let dw = pw * scale;
+    let dh = ph * scale;
+    ((ww - dw) / 2.0, (wh - dh) / 2.0, scale)
+}
+
+// ---------- image view ----------
+//
+// A viewer for release artwork (PNG / SVG / JPEG), so a cover can be
+// interrogated for colour in the same place the palettes live. Two jobs:
+//
+//   1. CLICK A PIXEL -> that colour becomes the current colour, flowing into the
+//      history and palettes exactly as an X11 screen pick does. The app already
+//      knew how to pick from the screen; it could not pick from a file.
+//   2. EXTRACT A PALETTE -> quantise the image down to its dominant colours and
+//      save them as a named palette.
+//
+// SVG works because librsvg's gdk-pixbuf loader is installed. (The rsvg-convert
+// BINARY is not — that is a separate trap, and why `make icons` mangles
+// gradients — but the library is what GTK needs.)
+
+/// Alpha below this is treated as "not really there" — a transparent corner is
+/// not a colour the artwork uses, and letting it into the palette would fill it
+/// with the checkerboard.
+const ALPHA_FLOOR: u8 = 128;
+
+/// Quantisation bucket: 4 bits per channel (16 levels), i.e. 4096 bins. Coarse
+/// enough that a gradient collapses into the few tones a human would name,
+/// fine enough to keep two similar-but-distinct brand colours apart.
+const QUANT_SHIFT: u8 = 4;
+
+/// The image's dominant colours, most-used first. Near-transparent pixels are
+/// skipped; the representative for each bin is the MEAN of the pixels in it, not
+/// the bin centre, so the result is a colour the image actually contains.
+fn dominant_colors(pb: &gdk_pixbuf::Pixbuf, want: usize) -> Vec<Rgb> {
+    let (w, h) = (pb.width(), pb.height());
+    let nch = pb.n_channels() as usize;
+    let rowstride = pb.rowstride() as usize;
+    let has_alpha = pb.has_alpha();
+    let bytes = unsafe { pb.pixels() };
+
+    // (count, sum_r, sum_g, sum_b) per bin.
+    let mut bins: HashMap<u16, (u64, u64, u64, u64)> = HashMap::new();
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let i = y * rowstride + x * nch;
+            if i + nch > bytes.len() {
+                continue;
+            }
+            if has_alpha && bytes[i + 3] < ALPHA_FLOOR {
+                continue;
+            }
+            let (r, g, b) = (bytes[i], bytes[i + 1], bytes[i + 2]);
+            let key = (((r >> QUANT_SHIFT) as u16) << 8)
+                | (((g >> QUANT_SHIFT) as u16) << 4)
+                | ((b >> QUANT_SHIFT) as u16);
+            let e = bins.entry(key).or_insert((0, 0, 0, 0));
+            e.0 += 1;
+            e.1 += r as u64;
+            e.2 += g as u64;
+            e.3 += b as u64;
+        }
+    }
+
+    let mut v: Vec<(u64, Rgb)> = bins
+        .into_values()
+        .map(|(n, sr, sg, sb)| {
+            (
+                n,
+                Rgb {
+                    r: (sr / n) as u8,
+                    g: (sg / n) as u8,
+                    b: (sb / n) as u8,
+                },
+            )
+        })
+        .collect();
+    v.sort_by(|a, b| b.0.cmp(&a.0));
+    v.into_iter().take(want).map(|(_, c)| c).collect()
+}
+
 fn read_gpl(text: &str) -> Result<Palette> {
     let mut name = String::new();
     let mut colors: Vec<Swatch> = Vec::new();
@@ -754,8 +1097,9 @@ fn build_ui(app: &Application) {
     let window = ApplicationWindow::builder()
         .application(app)
         .title("XColor")
-        .default_width(420)
-        .default_height(640)
+        // Wide enough for controls + a usable image area side by side.
+        .default_width(1000)
+        .default_height(720)
         .build();
 
     let header = HeaderBar::new();
@@ -765,10 +1109,9 @@ fn build_ui(app: &Application) {
     window.set_titlebar(Some(&header));
 
     let outer = GBox::new(Orientation::Vertical, 12);
-    outer.set_margin_top(12);
-    outer.set_margin_bottom(12);
-    outer.set_margin_start(12);
-    outer.set_margin_end(12);
+    // No margins here: `columns` (below) owns the window padding now that this
+    // is the left column rather than the whole window.
+    outer.set_margin_end(6); // breathing room before the scrollbar
 
     // top: swatch + code
     let top = GBox::new(Orientation::Horizontal, 12);
@@ -861,7 +1204,36 @@ fn build_ui(app: &Application) {
     pal_scroll.set_child(Some(&palettes_list));
     outer.append(&pal_scroll);
 
-    window.set_child(Some(&outer));
+    // Two columns. A 400x400 image area stacked under the controls turned the
+    // window into a ~1100px-tall strip; side by side, the controls keep their
+    // natural width and the image takes everything left over — and grows with
+    // the window instead of pushing it taller.
+    //
+    // The left column scrolls on its own so a long palette list cannot force
+    // the window's height either.
+    let left_scroll = gtk::ScrolledWindow::new();
+    left_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    left_scroll.set_child(Some(&outer));
+    left_scroll.set_size_request(380, -1);
+    left_scroll.set_hexpand(false);
+    left_scroll.set_vexpand(true);
+
+    // `shared` does not exist until the widget tree is done, so the image
+    // section is filled in below; this is its slot.
+    let image_slot = GBox::new(Orientation::Vertical, 0);
+    image_slot.set_hexpand(true);
+    image_slot.set_vexpand(true);
+
+    let columns = GBox::new(Orientation::Horizontal, 12);
+    columns.set_margin_top(12);
+    columns.set_margin_bottom(12);
+    columns.set_margin_start(12);
+    columns.set_margin_end(12);
+    columns.append(&left_scroll);
+    columns.append(&Separator::new(Orientation::Vertical));
+    columns.append(&image_slot);
+
+    window.set_child(Some(&columns));
 
     // load and wire state
     let data = load_data();
@@ -878,6 +1250,7 @@ fn build_ui(app: &Application) {
         palettes_list: palettes_list.clone(),
     };
     let shared: SharedState = Rc::new(RefCell::new(state));
+    image_slot.append(&build_image_view(&window, &shared));
 
     // swatch draw
     {
@@ -1148,5 +1521,45 @@ mod gpl_tests {
         let back = read_gpl(&fs::read_to_string(&dir).unwrap()).unwrap();
         assert_eq!(back.name, pal.name);
         assert_eq!(back.colors, pal.colors);
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    #[test]
+    fn fit_centres_and_preserves_aspect() {
+        // A wide image in a square box: letterboxed, centred vertically.
+        let (ox, oy, scale) = fitted(200.0, 100.0, 400.0, 400.0);
+        assert_eq!(scale, 2.0);
+        assert_eq!(ox, 0.0);
+        assert_eq!(oy, 100.0); // (400 - 200) / 2
+    }
+
+    #[test]
+    fn fit_never_magnifies_past_8x() {
+        // A 1px image must not blow up to fill a huge window.
+        let (_, _, scale) = fitted(1.0, 1.0, 4000.0, 4000.0);
+        assert_eq!(scale, 8.0);
+    }
+
+    #[test]
+    fn fit_and_hit_test_agree() {
+        // The draw and the click MUST use the same mapping, or you pick a
+        // different pixel from the one under the cursor. Round-trip the CENTRE
+        // of a pixel — a pixel *boundary* is genuinely ambiguous (and, with
+        // floating point, lands either side of it), so asserting on one would be
+        // testing the arithmetic's rounding rather than the mapping.
+        let (pw, ph, ww, wh) = (300.0, 200.0, 400.0, 400.0);
+        let (ox, oy, scale) = fitted(pw, ph, ww, wh);
+        for (tx, ty) in [(0.0, 0.0), (150.0, 100.0), (299.0, 199.0)] {
+            // widget coords of the centre of image pixel (tx, ty)
+            let px = ox + (tx + 0.5) * scale;
+            let py = oy + (ty + 0.5) * scale;
+            let ix = ((px - ox) / scale).floor();
+            let iy = ((py - oy) / scale).floor();
+            assert_eq!((ix, iy), (tx, ty), "pixel ({tx},{ty}) did not round-trip");
+        }
     }
 }
