@@ -101,10 +101,33 @@ enum Format {
     Hsl,
 }
 
+/// A colour in a palette. `Rgb` stays a bare `Copy` triple — it is also the
+/// history's element, and a picked colour has no name. A *palette* entry is
+/// different: it usually came from somewhere that named it (a design token, a
+/// GIMP swatch), and throwing that name away is throwing away the only thing
+/// that tells you what the colour is FOR.
+///
+/// `flatten` keeps the JSON as `{"r":..,"g":..,"b":..,"name":..}`, so a
+/// data.json written before names existed still loads — the name is simply
+/// absent.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct Swatch {
+    #[serde(flatten)]
+    rgb: Rgb,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+}
+
+impl Swatch {
+    fn new(rgb: Rgb) -> Self {
+        Swatch { rgb, name: None }
+    }
+}
+
 #[derive(Default, Serialize, Deserialize, Debug, Clone)]
 struct Palette {
     name: String,
-    colors: Vec<Rgb>,
+    colors: Vec<Swatch>,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
@@ -399,8 +422,8 @@ fn build_palette_row(
                     return;
                 };
                 if let Some(p) = s.data.palettes.get_mut(idx) {
-                    if !p.colors.contains(&c) {
-                        p.colors.push(c);
+                    if !p.colors.iter().any(|s| s.rgb == c) {
+                        p.colors.push(Swatch::new(c));
                     }
                 }
                 let _ = save_data(&s.data);
@@ -448,7 +471,8 @@ fn build_palette_row(
     row.append(&header);
 
     let chips = GBox::new(Orientation::Horizontal, 4);
-    for (cidx, color) in pal.colors.iter().enumerate() {
+    for (cidx, swatch) in pal.colors.iter().enumerate() {
+        let color = &swatch.rgb;
         let chip_box = GBox::new(Orientation::Vertical, 0);
         let chip = DrawingArea::new();
         chip.set_size_request(24, 24);
@@ -490,16 +514,64 @@ fn build_palette_row(
             }
         ));
         chip.add_controller(click);
-        chip.set_tooltip_text(Some(&format!(
-            "{} (left: select+copy, right: remove)",
-            c.hex()
-        )));
+        chip.set_tooltip_text(Some(&match &swatch.name {
+            Some(n) => format!("{n} — {} (left: select+copy, right: remove)", c.hex()),
+            None => format!("{} (left: select+copy, right: remove)", c.hex()),
+        }));
         chip_box.append(&chip);
         chips.append(&chip_box);
     }
     row.append(&chips);
     row.append(&Separator::new(Orientation::Horizontal));
     row
+}
+
+/// Read a palette off disk and add it. The app could always *export* and never
+/// *import*, so a palette that left the app could never come back — the reason
+/// the suite's theme palettes had to be hand-written into data.json.
+fn import_palette(window: &ApplicationWindow, shared: &SharedState) {
+    let dlg = gtk::FileDialog::builder()
+        .title("Import palette (.gpl / .json)")
+        .build();
+    dlg.open(
+        Some(window),
+        gio::Cancellable::NONE,
+        clone!(
+            #[weak]
+            window,
+            #[strong]
+            shared,
+            move |res| {
+                let Ok(file) = res else { return };
+                let Some(path) = file.path() else { return };
+                match read_palette(&path) {
+                    Ok(mut pal) => {
+                        {
+                            let mut s = shared.borrow_mut();
+                            // Don't silently merge into a same-named palette —
+                            // suffix instead, so an import never mutates
+                            // something the user already had.
+                            let taken: Vec<String> =
+                                s.data.palettes.iter().map(|p| p.name.clone()).collect();
+                            if taken.contains(&pal.name) {
+                                let base = pal.name.clone();
+                                let mut n = 2;
+                                while taken.contains(&format!("{base} ({n})")) {
+                                    n += 1;
+                                }
+                                pal.name = format!("{base} ({n})");
+                            }
+                            s.data.palettes.push(pal);
+                            let _ = save_data(&s.data);
+                        }
+                        let s = shared.borrow();
+                        refresh_palettes_ui(&s, &window, &shared);
+                    }
+                    Err(e) => show_error(&window, &format!("Import failed: {e}")),
+                }
+            }
+        ),
+    );
 }
 
 fn export_palette(window: &ApplicationWindow, shared: &SharedState, idx: usize) {
@@ -558,8 +630,17 @@ fn write_gpl(path: &Path, pal: &Palette) -> Result<()> {
             &pal.name
         }
     ));
-    for c in &pal.colors {
-        out.push_str(&format!("{:3} {:3} {:3}\t{}\n", c.r, c.g, c.b, c.hex()));
+    for s in &pal.colors {
+        let c = &s.rgb;
+        // GIMP treats everything after the hex as the swatch name, so a named
+        // swatch round-trips through .gpl without a custom format.
+        match &s.name {
+            Some(n) => out.push_str(&format!(
+                "{:3} {:3} {:3}\t{}\t{}\n",
+                c.r, c.g, c.b, c.hex(), n
+            )),
+            None => out.push_str(&format!("{:3} {:3} {:3}\t{}\n", c.r, c.g, c.b, c.hex())),
+        }
     }
     fs::write(path, out)?;
     Ok(())
@@ -572,17 +653,94 @@ fn write_css(path: &Path, pal: &Palette) -> Result<()> {
     } else {
         &pal.name
     });
-    for (i, c) in pal.colors.iter().enumerate() {
+    for (i, sw) in pal.colors.iter().enumerate() {
+        // A named swatch exports as its own name — the whole point of keeping
+        // it. Unnamed ones fall back to the positional index as before.
+        let key = match &sw.name {
+            Some(n) => sanitize(n),
+            None => (i + 1).to_string(),
+        };
         out.push_str(&format!(
             "  --{}-{}: {};\n",
             stem,
-            i + 1,
-            c.hex().to_lowercase()
+            key,
+            sw.rgb.hex().to_lowercase()
         ));
     }
     out.push_str("}\n");
     fs::write(path, out)?;
     Ok(())
+}
+
+/// Parse a GIMP palette. Deliberately tolerant: the format is old and every
+/// tool emits a slightly different dialect. We need three ints; a hex column
+/// and a name are both optional, and anything after the hex is the name (GIMP's
+/// own convention, and what `write_gpl` emits).
+fn read_gpl(text: &str) -> Result<Palette> {
+    let mut name = String::new();
+    let mut colors: Vec<Swatch> = Vec::new();
+
+    for line in text.lines() {
+        let line = line.trim_end();
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        if t.eq_ignore_ascii_case("GIMP Palette") {
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("Name:") {
+            name = rest.trim().to_string();
+            continue;
+        }
+        if t.starts_with("Columns:") {
+            continue;
+        }
+
+        // r g b [\t hex] [\t name]  — or  r g b  name with spaces.
+        let mut it = t.split_whitespace();
+        let (Some(r), Some(g), Some(b)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        let (Ok(r), Ok(g), Ok(b)) = (r.parse::<u8>(), g.parse::<u8>(), b.parse::<u8>()) else {
+            continue; // not a colour line — skip rather than fail the import
+        };
+        // Whatever remains is hex and/or name. Drop a leading hex token; keep
+        // the rest verbatim (names contain spaces).
+        let rest: Vec<&str> = it.collect();
+        let rest = match rest.split_first() {
+            Some((first, tail)) if first.starts_with('#') => tail.to_vec(),
+            _ => rest,
+        };
+        let label = rest.join(" ").trim().to_string();
+        colors.push(Swatch {
+            rgb: Rgb { r, g, b },
+            name: if label.is_empty() { None } else { Some(label) },
+        });
+    }
+
+    if colors.is_empty() {
+        anyhow::bail!("no colours found — is this a GIMP palette (.gpl)?");
+    }
+    if name.is_empty() {
+        name = "Imported".into();
+    }
+    Ok(Palette { name, colors })
+}
+
+/// Import a palette. `.gpl` is the interchange format; `.json` reads back what
+/// this app exported (so a palette round-trips without loss).
+fn read_palette(path: &Path) -> Result<Palette> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let is_json = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("json"));
+    if is_json {
+        return serde_json::from_str(&text).context("not a palette JSON");
+    }
+    read_gpl(&text)
 }
 
 fn write_json(path: &Path, pal: &Palette) -> Result<()> {
@@ -684,6 +842,11 @@ fn build_ui(app: &Application) {
     pal_title.set_xalign(0.0);
     pal_title.set_hexpand(true);
     pal_header.append(&pal_title);
+    let import_btn = Button::with_label("Import");
+    import_btn.set_tooltip_text(Some(
+        "Import a palette (.gpl / .json). Swatch names are kept.",
+    ));
+    pal_header.append(&import_btn);
     let new_pal_btn = Button::with_label("New palette");
     pal_header.append(&new_pal_btn);
     outer.append(&pal_header);
@@ -835,6 +998,15 @@ fn build_ui(app: &Application) {
         });
     }
 
+    // import palette
+    {
+        let shared = shared.clone();
+        let window = window.clone();
+        import_btn.connect_clicked(move |_| {
+            import_palette(&window, &shared);
+        });
+    }
+
     // new palette
     {
         let shared = shared.clone();
@@ -922,4 +1094,59 @@ fn main() -> glib::ExitCode {
     let app = Application::builder().application_id(APP_ID).build();
     app.connect_activate(build_ui);
     app.run()
+}
+
+#[cfg(test)]
+mod gpl_tests {
+    use super::*;
+
+    #[test]
+    fn reads_a_named_palette_and_keeps_the_names() {
+        let text = "GIMP Palette\nName: fizx.uk\nColumns: 0\n#\n# a comment\n\
+                      9  13  18\t#090D12\tbg\n\
+                    122 240 205\t#7AF0CD\taccent\n";
+        let p = read_gpl(text).unwrap();
+        assert_eq!(p.name, "fizx.uk");
+        assert_eq!(p.colors.len(), 2);
+        assert_eq!(p.colors[0].rgb, Rgb { r: 9, g: 13, b: 18 });
+        assert_eq!(p.colors[0].name.as_deref(), Some("bg"));
+        assert_eq!(p.colors[1].name.as_deref(), Some("accent"));
+    }
+
+    #[test]
+    fn reads_a_plain_gimp_palette_with_no_names() {
+        // komodo.gpl's shape — the format most tools actually emit.
+        let text = "GIMP Palette\nName: komodo\nColumns: 0\n#\n 29 153 142\t#1D998E\n";
+        let p = read_gpl(text).unwrap();
+        assert_eq!(p.colors.len(), 1);
+        assert!(p.colors[0].name.is_none());
+    }
+
+    #[test]
+    fn tolerates_names_with_spaces_and_a_missing_hex_column() {
+        let text = "GIMP Palette\nName: x\n#\n10 20 30 deep sea blue\n";
+        let p = read_gpl(text).unwrap();
+        assert_eq!(p.colors[0].name.as_deref(), Some("deep sea blue"));
+    }
+
+    #[test]
+    fn a_file_with_no_colours_is_an_error_not_an_empty_palette() {
+        assert!(read_gpl("GIMP Palette\nName: empty\n#\n").is_err());
+    }
+
+    #[test]
+    fn round_trips_through_write_gpl() {
+        let pal = Palette {
+            name: "rt".into(),
+            colors: vec![
+                Swatch { rgb: Rgb { r: 1, g: 2, b: 3 }, name: Some("one".into()) },
+                Swatch { rgb: Rgb { r: 4, g: 5, b: 6 }, name: None },
+            ],
+        };
+        let dir = std::env::temp_dir().join("xcolor-gpl-rt.gpl");
+        write_gpl(&dir, &pal).unwrap();
+        let back = read_gpl(&fs::read_to_string(&dir).unwrap()).unwrap();
+        assert_eq!(back.name, pal.name);
+        assert_eq!(back.colors, pal.colors);
+    }
 }
