@@ -634,7 +634,7 @@ fn build_tips(window: &ApplicationWindow, toggle: &ToggleButton) -> GBox {
         "samples/artwork.png — bigger than the canvas and not square, so it must be PLACED: drag to move, scroll to zoom, it snaps to the centre and edges.",
         "Disc — mask what you framed. Corners can be alpha, white, a colour, or a gradient — taken from the colours you have picked.",
         "Size — 200 to 1000. Changing it keeps your framing: the square grows, the picture stays where you put it.",
-        "Batch — the same recipe over a whole folder (a whole discography of cover.png). Dry run first; it never writes into your source folder.",
+        "Batch — the same recipe over a whole folder (a whole discography of cover.png), or over ndisc's PUBLISHED releases straight from the suite. Dry run first; it never writes into your source folder.",
         "Palettes — Import (.gpl/.json), or build one and export to GPL / CSS / JSON. Named swatches keep their names.",
     ] {
         let l = Label::new(Some(&format!("•  {line}")));
@@ -700,9 +700,35 @@ fn build_batch(
     let src: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
     let dst: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
     let stop = Arc::new(AtomicBool::new(false));
+    // ndisc's manifest, loaded when you switch to that scope and reused at run,
+    // so the count you saw and the set you process are the same read.
+    let manifest: Rc<RefCell<Option<Manifest>>> = Rc::new(RefCell::new(None));
 
     let body = GBox::new(Orientation::Vertical, 8);
     body.set_margin_top(6);
+
+    // --- scope: a folder, or ndisc's published discography ---
+    // The published option is only offered when ndisc has actually exported a
+    // manifest. A scope that can only ever match nothing is worse than no scope.
+    let has_manifest = published_manifest_path().is_some();
+    let scope_names: &[&str] = if has_manifest {
+        &["Folder", "Published discography"]
+    } else {
+        &["Folder"]
+    };
+    let row_scope = GBox::new(Orientation::Horizontal, 6);
+    let scope_lbl = Label::new(Some("Scope"));
+    scope_lbl.add_css_class("dim-label");
+    row_scope.append(&scope_lbl);
+    let dd_scope = gtk::DropDown::from_strings(scope_names);
+    dd_scope.set_tooltip_text(Some(
+        "Folder — any tree of artwork.\n\nPublished discography — the exact releases ndisc has published to Nostr, read from the suite's published.json. Its covers, mirrored to your output folder.",
+    ));
+    row_scope.append(&dd_scope);
+    row_scope.set_hexpand(true);
+    // Only worth a row when there is a choice to make.
+    row_scope.set_visible(has_manifest);
+    body.append(&row_scope);
 
     // --- folders ---
     let row_src = GBox::new(Orientation::Horizontal, 6);
@@ -828,6 +854,54 @@ fn build_batch(
         ));
     }
 
+    // Switching scope swaps what the source row means. Folder → the picker is
+    // live. Published → it is replaced by a read-only readout of the manifest
+    // (count + library root), because there is nothing to pick: the set is
+    // ndisc's, not yours. Loaded HERE so a broken manifest is a plain message
+    // now, not a surprise at run.
+    if has_manifest {
+        dd_scope.connect_selected_notify(clone!(
+            #[strong]
+            manifest,
+            #[strong]
+            src,
+            #[weak]
+            b_src,
+            #[weak]
+            l_src,
+            move |dd| {
+                if dd.selected() == 1 {
+                    let loaded = published_manifest_path()
+                        .ok_or_else(|| anyhow::anyhow!("published.json is gone"))
+                        .and_then(|p| load_manifest(&p));
+                    match loaded {
+                        Ok(m) => {
+                            l_src.set_text(&format!(
+                                "{} releases · {}",
+                                m.releases.len(),
+                                m.library_root.display()
+                            ));
+                            b_src.set_sensitive(false);
+                            *manifest.borrow_mut() = Some(m);
+                        }
+                        Err(e) => {
+                            l_src.set_text(&format!("{e:#}"));
+                            b_src.set_sensitive(false);
+                            *manifest.borrow_mut() = None;
+                        }
+                    }
+                } else {
+                    *manifest.borrow_mut() = None;
+                    // Clear the folder too, so the readout and the state agree —
+                    // a "no source folder" label over a still-set path is a lie.
+                    *src.borrow_mut() = None;
+                    b_src.set_sensitive(true);
+                    l_src.set_text("no source folder");
+                }
+            }
+        ));
+    }
+
     // The recipe's size is the canvas size — one control, not a second copy of
     // it that can disagree with what you are looking at.
     // Watching the SAME dropdown, rather than holding a copy of the size that
@@ -861,6 +935,8 @@ fn build_batch(
         let dst = dst.clone();
         let stop = stop.clone();
         let e_match = e_match.clone();
+        let dd_scope = dd_scope.clone();
+        let manifest = manifest.clone();
         let dd_frame = dd_frame.clone();
         let dd_disc = dd_disc.clone();
         let results = results.clone();
@@ -869,11 +945,30 @@ fn build_batch(
         let b_run = b_run.clone();
         let b_stop = b_stop.clone();
         Rc::new(move |dry: bool| {
-            let (Some(s_root), Some(o_root)) = (src.borrow().clone(), dst.borrow().clone()) else {
-                show_error(&window, "Choose a source folder and an output folder.");
+            let Some(o_root) = dst.borrow().clone() else {
+                show_error(&window, "Choose an output folder.");
                 return;
             };
-            if let Err(e) = guard_batch(&s_root, &o_root) {
+            // The scope decides where the images come from. The rest of the run
+            // is identical — that is the whole point of unifying them here.
+            let scope = if dd_scope.selected() == 1 {
+                match manifest.borrow().as_ref() {
+                    Some(m) => Scope::published(m),
+                    None => {
+                        show_error(&window, "The published discography could not be read. Re-select the scope, or point ndisc at Export.");
+                        return;
+                    }
+                }
+            } else {
+                match src.borrow().clone() {
+                    Some(s) => Scope::folder(s),
+                    None => {
+                        show_error(&window, "Choose a source folder.");
+                        return;
+                    }
+                }
+            };
+            if let Err(e) = guard_batch(&scope.guard_root, &o_root) {
                 show_error(&window, &format!("{e}"));
                 return;
             }
@@ -928,18 +1023,26 @@ fn build_batch(
 
             let (tx, rx) = async_channel::unbounded::<BatchMsg>();
             let worker_stop = stop.clone();
-            let s_root2 = s_root.clone();
+            let Scope { roots, strip, .. } = scope;
             std::thread::spawn(move || {
                 // Discovery is on the worker too: walking a music library is
-                // thousands of directories, and a frozen window during the
-                // "scanning…" step is still a frozen window.
+                // thousands of directories (one per release, under published
+                // scope), and a frozen window during the "scanning…" step is
+                // still a frozen window.
                 let mut files = Vec::new();
-                if let Err(e) = find_images(&s_root2, &needle, &mut files) {
-                    let _ = tx.send_blocking(BatchMsg::One {
-                        rel: s_root2.display().to_string(),
-                        result: Err(format!("{e}")),
-                    });
+                for root in &roots {
+                    if let Err(e) = find_images(root, &needle, &mut files) {
+                        // One unreadable release dir is not fatal to the run.
+                        let _ = tx.send_blocking(BatchMsg::One {
+                            rel: root.display().to_string(),
+                            result: Err(format!("{e}")),
+                        });
+                    }
                 }
+                // Release dirs are disjoint and a folder is walked once, so this
+                // is belt-and-braces — but a duplicate would be a wasted write.
+                files.sort();
+                files.dedup();
                 let _ = tx.send_blocking(BatchMsg::Total(files.len()));
 
                 let (mut ok, mut failed) = (0usize, 0usize);
@@ -949,7 +1052,7 @@ fn build_batch(
                         stopped = true;
                         break;
                     }
-                    let rel = f.strip_prefix(&s_root2).unwrap_or(&f).to_path_buf();
+                    let rel = f.strip_prefix(&strip).unwrap_or(&f).to_path_buf();
                     let result = batch_one(&f, &rel, &o_root, recipe, dry)
                         .map_err(|e| format!("{e:#}")); // {:#} = the whole context chain
                     match &result {
@@ -2707,6 +2810,79 @@ fn find_images(root: &Path, needle: &str, into: &mut Vec<PathBuf>) -> Result<()>
     Ok(())
 }
 
+// ---------- published-discography scope ----------
+//
+// A folder is the obvious source, but the one that makes this part of the suite
+// rather than a standalone utility is ndisc's manifest: the exact set of releases
+// published to Nostr, in the suite's own scope language. xcolor reading it costs
+// nothing and turns "disc-label every published release" into one choice.
+
+/// ndisc's export: the releases it has published, each with its on-disk dir.
+/// Only the fields batch needs — serde ignores the rest (id, artist, title…).
+#[derive(serde::Deserialize)]
+struct Manifest {
+    #[serde(rename = "libraryRoot")]
+    library_root: PathBuf,
+    releases: Vec<ManifestRelease>,
+}
+
+#[derive(serde::Deserialize)]
+struct ManifestRelease {
+    dir: PathBuf,
+}
+
+/// Where ndisc writes it. `None` if it has never exported one — in which case
+/// the published scope is not offered, because a scope that matches nothing is
+/// worse than no scope.
+fn published_manifest_path() -> Option<PathBuf> {
+    let p = dirs::data_dir()?.join("ndisc-suite").join("published.json");
+    p.exists().then_some(p)
+}
+
+fn load_manifest(path: &Path) -> Result<Manifest> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    let m: Manifest = serde_json::from_str(&text).context("published.json is not the shape we expect")?;
+    Ok(m)
+}
+
+/// Where a batch run gets its images, and what to strip to mirror the tree.
+///
+/// The distinction the two scopes share is exactly this: a set of roots to walk,
+/// and the prefix that turns an absolute hit into the relpath the output mirrors.
+/// For a folder both are the same path; for the manifest the roots are the
+/// release dirs and the prefix is the library root — so `artist/release/cover.png`
+/// comes out the same shape either way.
+struct Scope {
+    /// Every directory to search. One for a folder; N release dirs for published.
+    roots: Vec<PathBuf>,
+    /// Stripped off each hit to form the mirrored relpath.
+    strip: PathBuf,
+    /// The source boundary the guard protects. The originals live under here.
+    guard_root: PathBuf,
+}
+
+impl Scope {
+    fn folder(root: PathBuf) -> Scope {
+        Scope {
+            roots: vec![root.clone()],
+            strip: root.clone(),
+            guard_root: root,
+        }
+    }
+
+    /// The published releases become the walk roots; the library root is both the
+    /// mirror prefix and the boundary the guard protects — the originals ARE the
+    /// library, and every release dir lives under it.
+    fn published(m: &Manifest) -> Scope {
+        Scope {
+            roots: m.releases.iter().map(|r| r.dir.clone()).collect(),
+            strip: m.library_root.clone(),
+            guard_root: m.library_root.clone(),
+        }
+    }
+}
+
 /// Output path: the source tree's shape, mirrored under `out_root`. Always PNG —
 /// an alpha corner fill has nowhere to live in a JPEG.
 fn batch_dest(rel: &Path, out_root: &Path, disc: bool) -> PathBuf {
@@ -4057,6 +4233,47 @@ mod batch_tests {
         // Alpha corners: the disc is inscribed, so (0,0) is outside it.
         let b = unsafe { got.pixels() };
         assert_eq!(b[3], 0, "the corner must be transparent");
+    }
+
+    #[test]
+    fn the_manifest_becomes_release_dirs_stripped_to_the_library_root() {
+        // The point of published scope: cover.png in each release mirrors to
+        // artist/release/ under the output, the same shape a folder walk gives —
+        // because the strip prefix is the library root, not each release dir.
+        let m: Manifest = serde_json::from_str(
+            r#"{
+                "libraryRoot": "/data/music",
+                "releases": [
+                    {"id": 1, "artist": "214", "title": "Fuel Cells", "dir": "/data/music/214/Fuel Cells"},
+                    {"id": 4, "artist": "2562", "title": "Aerial", "dir": "/data/music/2562/Aerial"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let s = Scope::published(&m);
+        assert_eq!(s.roots.len(), 2);
+        assert_eq!(s.strip, Path::new("/data/music"));
+        assert_eq!(s.guard_root, Path::new("/data/music"));
+        // A hit under a release dir strips to artist/release/file.
+        let hit = Path::new("/data/music/214/Fuel Cells/cover.png");
+        let rel = hit.strip_prefix(&s.strip).unwrap();
+        assert_eq!(
+            batch_dest(rel, Path::new("/tmp/out"), true),
+            Path::new("/tmp/out/214/Fuel Cells/cover-disc.png")
+        );
+    }
+
+    #[test]
+    fn the_guard_protects_the_whole_library_under_published_scope() {
+        // Output inside the library would be caught, because guard_root IS the
+        // library root — the originals are the entire tree, not one release.
+        let m: Manifest = serde_json::from_str(
+            r#"{"libraryRoot": "/data/music", "releases": []}"#,
+        )
+        .unwrap();
+        let s = Scope::published(&m);
+        assert!(guard_batch(&s.guard_root, Path::new("/data/music/_discs")).is_err());
+        assert!(guard_batch(&s.guard_root, Path::new("/data/discs")).is_ok());
     }
 
     #[test]
