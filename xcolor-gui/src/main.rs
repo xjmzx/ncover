@@ -792,6 +792,10 @@ fn build_batch(
 
     // --- run ---
     let row_go = GBox::new(Orientation::Horizontal, 6);
+    let b_preview = Button::with_label("Preview");
+    b_preview.set_tooltip_text(Some(
+        "Render the first few outputs and show them as thumbnails — SEE what the recipe does before it writes anything.",
+    ));
     let b_dry = Button::with_label("Dry run");
     b_dry.set_tooltip_text(Some(
         "List what WOULD be written, writing nothing. Every image is still opened and framed, so a file that would fail, fails here.",
@@ -800,6 +804,7 @@ fn build_batch(
     b_run.add_css_class("suggested-action");
     let b_stop = Button::with_label("Stop");
     b_stop.set_sensitive(false);
+    row_go.append(&b_preview);
     row_go.append(&b_dry);
     row_go.append(&b_run);
     row_go.append(&b_stop);
@@ -809,6 +814,20 @@ fn build_batch(
     l_prog.set_xalign(1.0);
     row_go.append(&l_prog);
     body.append(&row_go);
+
+    // The preview contact sheet — hidden until you ask for one.
+    let preview_flow = gtk::FlowBox::new();
+    preview_flow.set_selection_mode(gtk::SelectionMode::None);
+    preview_flow.set_max_children_per_line(6);
+    preview_flow.set_row_spacing(6);
+    preview_flow.set_column_spacing(6);
+    let preview_scroll = gtk::ScrolledWindow::new();
+    preview_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    preview_scroll.set_min_content_height(160);
+    preview_scroll.set_max_content_height(340);
+    preview_scroll.set_child(Some(&preview_flow));
+    preview_scroll.set_visible(false);
+    body.append(&preview_scroll);
 
     let results = ListBox::new();
     results.set_selection_mode(gtk::SelectionMode::None);
@@ -929,54 +948,44 @@ fn build_batch(
         move |dd| note.set_text(&note_from(dd.selected()))
     ));
 
-    let run = {
+    // Where the images come from — folder or manifest — with the errors shown.
+    // Shared by Run and Preview so they can never disagree about the set.
+    let resolve_scope: Rc<dyn Fn() -> Option<Scope>> = {
         let window = window.clone();
-        let shared = shared.clone();
-        let canvas = canvas.clone();
-        let src = src.clone();
-        let dst = dst.clone();
-        let stop = stop.clone();
-        let e_match = e_match.clone();
         let dd_scope = dd_scope.clone();
         let manifest = manifest.clone();
-        let dd_frame = dd_frame.clone();
-        let dd_disc = dd_disc.clone();
-        let results = results.clone();
-        let l_prog = l_prog.clone();
-        let b_dry = b_dry.clone();
-        let b_run = b_run.clone();
-        let b_stop = b_stop.clone();
-        Rc::new(move |dry: bool| {
-            let Some(o_root) = dst.borrow().clone() else {
-                show_error(&window, "Choose an output folder.");
-                return;
-            };
-            // The scope decides where the images come from. The rest of the run
-            // is identical — that is the whole point of unifying them here.
-            let scope = if dd_scope.selected() == 1 {
+        let src = src.clone();
+        Rc::new(move || {
+            if dd_scope.selected() == 1 {
                 match manifest.borrow().as_ref() {
-                    Some(m) => Scope::published(m),
+                    Some(m) => Some(Scope::published(m)),
                     None => {
                         show_error(&window, "The published discography could not be read. Re-select the scope, or point ndisc at Export.");
-                        return;
+                        None
                     }
                 }
             } else {
                 match src.borrow().clone() {
-                    Some(s) => Scope::folder(s),
+                    Some(s) => Some(Scope::folder(s)),
                     None => {
                         show_error(&window, "Choose a source folder.");
-                        return;
+                        None
                     }
                 }
-            };
-            if let Err(e) = guard_batch(&scope.guard_root, &o_root) {
-                show_error(&window, &format!("{e}"));
-                return;
             }
+        })
+    };
 
-            // The disc fill resolves from the picked colours HERE, once, so every
-            // file in the run gets the same fill even if you pick while it runs.
+    // The recipe as currently dialled in. The disc fill resolves from the picked
+    // colours ONCE here, so every file in a run gets the same fill even if you
+    // pick while it runs — and a Preview shows exactly that fill.
+    let resolve_recipe: Rc<dyn Fn() -> Option<Recipe>> = {
+        let window = window.clone();
+        let shared = shared.clone();
+        let canvas = canvas.clone();
+        let dd_frame = dd_frame.clone();
+        let dd_disc = dd_disc.clone();
+        Rc::new(move || {
             let (cur, prev) = {
                 let st = shared.borrow();
                 (
@@ -992,18 +1001,18 @@ fn build_batch(
                     Some(c) => Some(OuterFill::Solid(c)),
                     None => {
                         show_error(&window, "Pick a colour first — that is the fill.");
-                        return;
+                        return None;
                     }
                 },
                 _ => match (cur, prev) {
                     (Some(i), Some(o)) => Some(OuterFill::Gradient { inner: i, outer: o }),
                     _ => {
                         show_error(&window, "A gradient needs two colours — pick a second one.");
-                        return;
+                        return None;
                     }
                 },
             };
-            let recipe = Recipe {
+            Some(Recipe {
                 canvas: canvas.get(),
                 framing: if dd_frame.selected() == 1 {
                     Framing::Fit
@@ -1011,7 +1020,33 @@ fn build_batch(
                     Framing::Cover
                 },
                 disc,
+            })
+        })
+    };
+
+    let run = {
+        let window = window.clone();
+        let dst = dst.clone();
+        let stop = stop.clone();
+        let e_match = e_match.clone();
+        let resolve_scope = resolve_scope.clone();
+        let resolve_recipe = resolve_recipe.clone();
+        let results = results.clone();
+        let l_prog = l_prog.clone();
+        let b_dry = b_dry.clone();
+        let b_run = b_run.clone();
+        let b_stop = b_stop.clone();
+        Rc::new(move |dry: bool| {
+            let Some(o_root) = dst.borrow().clone() else {
+                show_error(&window, "Choose an output folder.");
+                return;
             };
+            let Some(scope) = resolve_scope() else { return };
+            if let Err(e) = guard_batch(&scope.guard_root, &o_root) {
+                show_error(&window, &format!("{e}"));
+                return;
+            }
+            let Some(recipe) = resolve_recipe() else { return };
             let needle = e_match.text().to_string();
 
             while let Some(c) = results.first_child() {
@@ -1188,13 +1223,166 @@ fn build_batch(
         move |_| stop.store(true, Ordering::Relaxed)
     ));
 
+    // Preview: render the first PREVIEW_N outputs and show them as a contact
+    // sheet. Nothing is written — this is the "see it before it can mess anything
+    // up" pass, and for a big scope it is the difference between catching a wrong
+    // recipe and discovering it in 500 files.
+    let preview = {
+        let e_match = e_match.clone();
+        let resolve_scope = resolve_scope.clone();
+        let resolve_recipe = resolve_recipe.clone();
+        let preview_flow = preview_flow.clone();
+        let preview_scroll = preview_scroll.clone();
+        let l_prog = l_prog.clone();
+        let b_preview = b_preview.clone();
+        Rc::new(move || {
+            let Some(scope) = resolve_scope() else { return };
+            let Some(recipe) = resolve_recipe() else { return };
+            let needle = e_match.text().to_string();
+
+            while let Some(c) = preview_flow.first_child() {
+                preview_flow.remove(&c);
+            }
+            preview_scroll.set_visible(true);
+            l_prog.set_text("rendering preview…");
+            b_preview.set_sensitive(false);
+
+            let (tx, rx) = async_channel::unbounded::<PreviewMsg>();
+            let Scope { roots, strip, .. } = scope;
+            std::thread::spawn(move || {
+                let mut files = Vec::new();
+                for root in &roots {
+                    let _ = find_images(root, &needle, &mut files);
+                }
+                files.sort();
+                files.dedup();
+                let _ = tx.send_blocking(PreviewMsg::Total(files.len()));
+                // Render only the first N. Pixbuf work off the main thread is
+                // fine — it is image data, never GTK — and only the RGBA bytes
+                // (Send) cross back.
+                for f in files.iter().take(PREVIEW_N) {
+                    let label = f.strip_prefix(&strip).unwrap_or(f).display().to_string();
+                    let msg = match batch_render(f, recipe)
+                        .and_then(|pb| {
+                            pb.scale_simple(PREVIEW_PX, PREVIEW_PX, gdk_pixbuf::InterpType::Bilinear)
+                                .context("could not scale the thumbnail")
+                        }) {
+                        Ok(t) => PreviewMsg::Thumb {
+                            label,
+                            thumb: Some((
+                                unsafe { t.pixels() }.to_vec(),
+                                t.width(),
+                                t.height(),
+                                t.rowstride(),
+                                t.has_alpha(),
+                            )),
+                            err: None,
+                        },
+                        Err(e) => PreviewMsg::Thumb {
+                            label,
+                            thumb: None,
+                            err: Some(format!("{e:#}")),
+                        },
+                    };
+                    let _ = tx.send_blocking(msg);
+                }
+                let _ = tx.send_blocking(PreviewMsg::Done);
+            });
+
+            glib::spawn_future_local(clone!(
+                #[weak]
+                preview_flow,
+                #[weak]
+                l_prog,
+                #[weak]
+                b_preview,
+                async move {
+                    let mut total = 0usize;
+                    let mut shown = 0usize;
+                    let mut failed = 0usize;
+                    while let Ok(msg) = rx.recv().await {
+                        match msg {
+                            PreviewMsg::Total(n) => {
+                                total = n;
+                                if n == 0 {
+                                    l_prog.set_text("nothing matched");
+                                }
+                            }
+                            PreviewMsg::Thumb { label, thumb, err } => {
+                                shown += 1;
+                                let cell = GBox::new(Orientation::Vertical, 2);
+                                match thumb {
+                                    Some((bytes, w, h, rowstride, has_alpha)) => {
+                                        let pb = gdk_pixbuf::Pixbuf::from_bytes(
+                                            &glib::Bytes::from_owned(bytes),
+                                            gdk_pixbuf::Colorspace::Rgb,
+                                            has_alpha,
+                                            8,
+                                            w,
+                                            h,
+                                            rowstride,
+                                        );
+                                        let tex = gtk::gdk::Texture::for_pixbuf(&pb);
+                                        let pic = gtk::Picture::for_paintable(&tex);
+                                        pic.set_size_request(PREVIEW_PX, PREVIEW_PX);
+                                        pic.add_css_class("frame");
+                                        cell.append(&pic);
+                                    }
+                                    None => {
+                                        failed += 1;
+                                        let x = Label::new(Some("render failed"));
+                                        x.add_css_class("error");
+                                        x.set_size_request(PREVIEW_PX, PREVIEW_PX);
+                                        x.set_wrap(true);
+                                        x.set_tooltip_text(err.as_deref());
+                                        cell.append(&x);
+                                    }
+                                }
+                                let cap = Label::new(Some(&label));
+                                cap.add_css_class("dim-label");
+                                cap.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+                                cap.set_max_width_chars(18);
+                                cap.set_tooltip_text(Some(&label));
+                                cell.append(&cap);
+                                preview_flow.insert(&cell, -1);
+                            }
+                            PreviewMsg::Done => {
+                                let more = total.saturating_sub(shown);
+                                l_prog.set_text(&format!(
+                                    "preview: {shown} of {total}{}{}",
+                                    if failed > 0 {
+                                        format!(" · {failed} failed")
+                                    } else {
+                                        String::new()
+                                    },
+                                    if more > 0 {
+                                        format!(" · {more} more not shown")
+                                    } else {
+                                        String::new()
+                                    }
+                                ));
+                                b_preview.set_sensitive(true);
+                                break;
+                            }
+                        }
+                    }
+                }
+            ));
+        })
+    };
+    b_preview.connect_clicked(clone!(
+        #[strong]
+        preview,
+        move |_| preview()
+    ));
+
     let head = GBox::new(Orientation::Horizontal, 8);
     let t = Label::new(Some("Batch"));
     t.add_css_class("section-head");
     t.set_xalign(0.0);
     t.set_hexpand(true);
     head.append(&t);
-    let hint = Label::new(Some("apply this recipe to a folder"));
+    let hint = Label::new(Some("apply this recipe to a folder — Preview first"));
     hint.add_css_class("dim-label");
     head.append(&hint);
     head.set_hexpand(true);
@@ -3224,10 +3412,10 @@ fn batch_dest(rel: &Path, out_root: &Path, disc: bool) -> PathBuf {
     p
 }
 
-/// One file, start to finish. `dry` computes the destination and does everything
-/// except write it — so a dry run exercises the same code path and can still
-/// fail on a file that would really fail.
-fn batch_one(src: &Path, rel: &Path, out_root: &Path, r: Recipe, dry: bool) -> Result<PathBuf> {
+/// Render one source through the recipe to the final pixbuf — read, frame, disc.
+/// The ONE place the batch output is produced, so what a Preview shows and what a
+/// Run writes are byte-identical by construction, not by two code paths agreeing.
+fn batch_render(src: &Path, r: Recipe) -> Result<gdk_pixbuf::Pixbuf> {
     let is_svg = src
         .extension()
         .and_then(|e| e.to_str())
@@ -3250,11 +3438,16 @@ fn batch_one(src: &Path, rel: &Path, out_root: &Path, r: Recipe, dry: bool) -> R
         Framing::Fit => Placement::fit(w, h, r.canvas),
     };
     let framed = compose(&pb, place, r.canvas)?;
-    let final_pb = match r.disc {
-        Some(fill) => disc_template(&framed, fill)?,
-        None => framed,
-    };
+    match r.disc {
+        Some(fill) => disc_template(&framed, fill),
+        None => Ok(framed),
+    }
+}
 
+/// One file, start to finish. `dry` renders (so it still fails on a file that
+/// would really fail) but does everything except write.
+fn batch_one(src: &Path, rel: &Path, out_root: &Path, r: Recipe, dry: bool) -> Result<PathBuf> {
+    let final_pb = batch_render(src, r)?;
     let dest = batch_dest(rel, out_root, r.disc.is_some());
     if dry {
         return Ok(dest);
@@ -3283,6 +3476,30 @@ enum BatchMsg {
         failed: usize,
         stopped: bool,
     },
+}
+
+/// How many outputs a Preview renders. A contact sheet is a SAMPLE you eyeball to
+/// catch "my recipe is wrong" before it touches 500 files — not the whole run.
+const PREVIEW_N: usize = 12;
+
+/// Thumbnail side, px. Big enough to see a bad crop or a wrong corner fill.
+const PREVIEW_PX: i32 = 132;
+
+/// A rendered thumbnail on its way back from the worker. Pixbuf is `!Send`, so it
+/// cannot cross the thread — the raw RGBA bytes (which ARE Send) do, and the main
+/// thread rebuilds the pixbuf. Rendering itself is fine off-thread: it is pure
+/// image data, never GTK, exactly as the real run already does.
+enum PreviewMsg {
+    Total(usize),
+    Thumb {
+        label: String,
+        /// `(rgba, w, h, rowstride, has_alpha)` on success; `None` with a reason
+        /// on failure — a preview must show the failures too, or it lies about
+        /// what the run will do.
+        thumb: Option<(Vec<u8>, i32, i32, i32, bool)>,
+        err: Option<String>,
+    },
+    Done,
 }
 
 // ---------- SVG introspection ----------
@@ -4532,6 +4749,19 @@ mod batch_tests {
         assert_eq!(sane_canvas(437), CANVAS_DEFAULT);
         assert_eq!(sane_canvas(1000), 1000);
         assert!(CANVAS_SIZES.contains(&CANVAS_DEFAULT));
+    }
+
+    #[test]
+    #[ignore] // touches /data/music; run explicitly
+    fn preview_render_of_a_real_cover_is_a_square_thumb() {
+        let src = std::path::Path::new("/data/music/214/Fuel Cells/cover.jpg");
+        let r = Recipe { canvas: 600, framing: Framing::Cover, disc: Some(OuterFill::Alpha) };
+        let full = batch_render(src, r).unwrap();
+        assert_eq!((full.width(), full.height()), (600, 600));
+        let t = full.scale_simple(PREVIEW_PX, PREVIEW_PX, gdk_pixbuf::InterpType::Bilinear).unwrap();
+        assert_eq!((t.width(), t.height()), (PREVIEW_PX, PREVIEW_PX));
+        // Alpha corner present.
+        assert!(t.has_alpha());
     }
 
     #[test]
