@@ -2887,6 +2887,23 @@ fn write_css(path: &Path, pal: &Palette) -> Result<()> {
 /// hand-rolled in draw calls. Selectors, custom classes, spacing, borders — all
 /// of it. Rust is not the constraint; GTK is the toolkit.
 const APP_CSS: &str = "
+  /* A darker ground than the theme's grey — not black — so the small, dim text
+     reads against it. Both the named colours (for themed widgets: cards,
+     popovers, entries) and the window/headerbar nodes directly, since a theme
+     might paint those without the named colour. */
+  @define-color window_bg_color #171717;
+  @define-color view_bg_color #121212;
+  @define-color headerbar_bg_color #1d1d1d;
+  @define-color card_bg_color #1f1f1f;
+  @define-color popover_bg_color #1d1d1d;
+  window, window.background { background-color: #171717; }
+  headerbar { background-color: #1d1d1d; }
+
+  /* Lift the dim/secondary text a notch. The theme dims it to ~0.55, which is
+     too faint on the darker ground; 0.74 brightens it a fraction without taking
+     it to full white. */
+  .dim-label { opacity: 0.74; }
+
   .section-head { font-weight: 700; }
   .tips-card {
     background: alpha(@accent_bg_color, 0.10);
