@@ -807,7 +807,11 @@ fn build_tips(window: &ApplicationWindow, toggle: &ToggleButton) -> GBox {
     t.set_xalign(0.0);
     t.set_hexpand(true);
     head.append(&t);
-    let close = Button::with_label("Don’t show again");
+    // Just a close [x] — the panel always comes back from the [!] toggle, so
+    // "Don't show again" was overstating it.
+    let close = Button::from_icon_name("window-close-symbolic");
+    close.add_css_class("flat");
+    close.set_tooltip_text(Some("Hide — reopen any time with the [!] button"));
     head.append(&close);
     b.append(&head);
 
