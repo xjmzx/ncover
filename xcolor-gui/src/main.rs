@@ -28,6 +28,10 @@ const HISTORY_PALETTE: usize = 10;
 /// How many palettes ride along on the Picker view beside the History palette.
 const PINNED_MAX: usize = 3;
 
+/// Swatches per row before a palette wraps. Ten reads as a row you can count at
+/// a glance; more and it becomes a wall.
+const SWATCHES_PER_ROW: usize = 10;
+
 // ---------- color model ----------
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -466,9 +470,16 @@ fn build_compact_strip(
 
     let flow = gtk::FlowBox::new();
     flow.set_selection_mode(gtk::SelectionMode::None);
-    flow.set_max_children_per_line(16);
-    flow.set_column_spacing(3);
-    flow.set_row_spacing(3);
+    // Ten to a row, then wrap; squares touch. NOT homogeneous — homogeneous
+    // stretches each cell to fill the width, which turns the squares into
+    // gap-separated rectangles. Non-homogeneous cells hug the 22px chip, so with
+    // zero spacing and zero child padding the squares sit edge to edge.
+    flow.set_max_children_per_line(SWATCHES_PER_ROW as u32);
+    flow.set_column_spacing(0);
+    flow.set_row_spacing(0);
+    flow.set_homogeneous(false);
+    flow.set_halign(gtk::Align::Start);
+    flow.add_css_class("swatch-flow");
     for color in colors {
         let c = *color;
         let chip = DrawingArea::new();
@@ -705,12 +716,20 @@ fn build_palette_row(
     row.append(&header);
 
     let pal_name = pal.name.clone();
-    let chips = GBox::new(Orientation::Horizontal, 4);
+    // Same layout as the compact strips: ten per row, no gap, wrap. A palette
+    // should read the same on both surfaces.
+    let chips = gtk::FlowBox::new();
+    chips.set_selection_mode(gtk::SelectionMode::None);
+    chips.set_max_children_per_line(SWATCHES_PER_ROW as u32);
+    chips.set_column_spacing(0);
+    chips.set_row_spacing(0);
+    chips.set_homogeneous(false);
+    chips.set_halign(gtk::Align::Start);
+    chips.add_css_class("swatch-flow");
     for (cidx, swatch) in pal.colors.iter().enumerate() {
         let color = &swatch.rgb;
-        let chip_box = GBox::new(Orientation::Vertical, 0);
         let chip = DrawingArea::new();
-        chip.set_size_request(24, 24);
+        chip.set_size_request(22, 22);
         let c = *color;
         chip.set_draw_func(move |_, cr, w, h| {
             cr.set_source_rgb(c.r as f64 / 255.0, c.g as f64 / 255.0, c.b as f64 / 255.0);
@@ -770,8 +789,7 @@ fn build_palette_row(
             Some(n) => format!("{n} — {} (left: select+copy, right: remove)", c.hex()),
             None => format!("{} (left: select+copy, right: remove)", c.hex()),
         }));
-        chip_box.append(&chip);
-        chips.append(&chip_box);
+        chips.insert(&chip, -1);
     }
     row.append(&chips);
     row.append(&Separator::new(Orientation::Horizontal));
@@ -2929,6 +2947,9 @@ const APP_CSS: &str = "
   .tips-card label { font-size: 0.92em; }
   .canvas-frame { border-radius: 6px; }
   expander title { padding: 2px 0; }
+  /* Swatches must touch: the theme pads flowboxchild, which shows as a gap
+     between squares even with the FlowBox's own spacing at zero. */
+  .swatch-flow > flowboxchild { padding: 0; margin: 0; min-width: 0; min-height: 0; }
 ";
 
 fn install_css() {
