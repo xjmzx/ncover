@@ -33,6 +33,12 @@ install: target/release/xcolor
 install-gui: target/release/ncover
 	install -s -D -m755 -- target/release/ncover "$(DESTDIR)$(PREFIX)/bin/ncover"
 	install -D -m644 -- extra/io.github.xjmzx.NCover.desktop "$(DESTDIR)$(PREFIX)/share/applications/io.github.xjmzx.NCover.desktop"
+	install -D -m644 -- extra/icons/ncover-16.png "$(DESTDIR)$(PREFIX)/share/icons/hicolor/16x16/apps/ncover.png"
+	install -D -m644 -- extra/icons/ncover-24.png "$(DESTDIR)$(PREFIX)/share/icons/hicolor/24x24/apps/ncover.png"
+	install -D -m644 -- extra/icons/ncover-32.png "$(DESTDIR)$(PREFIX)/share/icons/hicolor/32x32/apps/ncover.png"
+	install -D -m644 -- extra/icons/ncover-48.png "$(DESTDIR)$(PREFIX)/share/icons/hicolor/48x48/apps/ncover.png"
+	install -D -m644 -- extra/icons/ncover-256.png "$(DESTDIR)$(PREFIX)/share/icons/hicolor/256x256/apps/ncover.png"
+	install -D -m644 -- extra/icons/ncover-512.png "$(DESTDIR)$(PREFIX)/share/icons/hicolor/512x512/apps/ncover.png"
 
 install-all: install install-gui
 
@@ -42,6 +48,12 @@ uninstall:
 	rm -f -- "$(DESTDIR)$(PREFIX)/share/man/man1/xcolor.1"
 	rm -f -- "$(DESTDIR)$(PREFIX)/share/applications/xcolor.desktop"
 	rm -f -- "$(DESTDIR)$(PREFIX)/share/applications/io.github.xjmzx.NCover.desktop"
+	rm -f -- "$(DESTDIR)$(PREFIX)/share/icons/hicolor/16x16/apps/ncover.png"
+	rm -f -- "$(DESTDIR)$(PREFIX)/share/icons/hicolor/24x24/apps/ncover.png"
+	rm -f -- "$(DESTDIR)$(PREFIX)/share/icons/hicolor/32x32/apps/ncover.png"
+	rm -f -- "$(DESTDIR)$(PREFIX)/share/icons/hicolor/48x48/apps/ncover.png"
+	rm -f -- "$(DESTDIR)$(PREFIX)/share/icons/hicolor/256x256/apps/ncover.png"
+	rm -f -- "$(DESTDIR)$(PREFIX)/share/icons/hicolor/512x512/apps/ncover.png"
 	rm -f -- "$(DESTDIR)$(PREFIX)/share/icons/hicolor/16x16/apps/xcolor.png"
 	rm -f -- "$(DESTDIR)$(PREFIX)/share/icons/hicolor/24x24/apps/xcolor.png"
 	rm -f -- "$(DESTDIR)$(PREFIX)/share/icons/hicolor/32x32/apps/xcolor.png"

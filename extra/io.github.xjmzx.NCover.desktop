@@ -8,6 +8,6 @@ Exec=ncover
 Terminal=false
 Type=Application
 Categories=Graphics;Utility;
-Icon=xcolor
+Icon=ncover
 StartupNotify=true
 StartupWMClass=io.github.xjmzx.NCover
