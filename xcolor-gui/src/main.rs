@@ -627,7 +627,8 @@ fn build_tips(window: &ApplicationWindow, toggle: &ToggleButton) -> GBox {
 
     for line in [
         "Pick — grab any colour on screen. It lands in the history and the clipboard.",
-        "Image ▸ Open — artwork (PNG / SVG). Click any pixel to pick from it.",
+        "Image ▸ Open — artwork (PNG / SVG / JPEG / WebP). Click any pixel to pick from it.",
+        "Browse… — point at a FOLDER and scroll every cover in it with ◀ ▶ or the arrow keys.",
         "samples/shapes.svg — an SVG STATES its colours: Inspect lists the exact fills with use counts, not a guess from pixels.",
         "samples/disc-label.svg — Inspect also reads the FONTS and the text. For label art that is most of what you need.",
         "samples/swatches.png — a raster only implies its colours, so “Palette from image” quantises them.",
@@ -1256,6 +1257,12 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     ));
     header.append(&blank_btn);
 
+    let browse_btn = Button::with_label("Browse…");
+    browse_btn.set_tooltip_text(Some(
+        "Open a FOLDER and scroll through every image in it (◀ ▶ or the arrow keys) — a cover directory, a release collection.",
+    ));
+    header.append(&browse_btn);
+
     let pal_btn = Button::with_label("Palette from image");
     pal_btn.set_tooltip_text(Some(
         "Extract the image's dominant colours as a new palette",
@@ -1299,6 +1306,28 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     b_grid.set_sensitive(false);
     ctl.set_visible(false);
     box_.append(&ctl);
+
+    // ---- browse nav: only shown while scrolling a folder --------------------
+    let nav = GBox::new(Orientation::Horizontal, 6);
+    let b_prev = Button::from_icon_name("go-previous-symbolic");
+    b_prev.set_tooltip_text(Some("Previous image (←)"));
+    let b_next = Button::from_icon_name("go-next-symbolic");
+    b_next.set_tooltip_text(Some("Next image (→)"));
+    let nav_lbl = Label::new(None);
+    nav_lbl.add_css_class("dim-label");
+    nav_lbl.set_hexpand(true);
+    nav_lbl.set_xalign(0.0);
+    nav_lbl.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    nav.append(&b_prev);
+    nav.append(&b_next);
+    nav.append(&nav_lbl);
+    nav.set_visible(false);
+    box_.append(&nav);
+
+    // The browse list and where we are in it. A plain Vec of paths so the SAME
+    // nav can later be fed by the published manifest's covers, not only a folder.
+    let browse: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
+    let browse_idx: Rc<Cell<usize>> = Rc::new(Cell::new(0));
 
     // 400x400 is the floor, not the size — it expands with the window.
     let area = gtk::DrawingArea::new();
@@ -2039,63 +2068,116 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     };
 
     let rebuild_inspect = Rc::new(rebuild_inspect);
+
+    // The ONE place a loaded image becomes what is on the canvas — pixbuf, name,
+    // any SVG facts, framing, and every control switched live. Open, Blank and
+    // the folder browser all funnel through here, so they cannot drift: whatever
+    // one of them enables, they all do. `tip` is the full path for the hover, or
+    // None for a synthetic canvas that has no path.
+    let set_image: Rc<dyn Fn(gdk_pixbuf::Pixbuf, String, Option<SvgInfo>, Option<String>)> = {
+        let canvas = canvas.clone();
+        let pixbuf = pixbuf.clone();
+        let place = place.clone();
+        let svg = svg.clone();
+        let out = out.clone();
+        let name = name.clone();
+        let rebuild_inspect = rebuild_inspect.clone();
+        let ctl = ctl.clone();
+        let b_grid = b_grid.clone();
+        let b_fit = b_fit.clone();
+        let b_cover = b_cover.clone();
+        let b_centre = b_centre.clone();
+        let b_11 = b_11.clone();
+        let pal_btn = pal_btn.clone();
+        let tpl = tpl.clone();
+        let b_alpha = b_alpha.clone();
+        let b_white = b_white.clone();
+        let b_solid = b_solid.clone();
+        let b_grad = b_grad.clone();
+        let b_reset = b_reset.clone();
+        let bld = bld.clone();
+        let b_invert = b_invert.clone();
+        let b_square = b_square.clone();
+        let sq_scale = sq_scale.clone();
+        let b_save = b_save.clone();
+        let area = area.clone();
+        let file_lbl = file_lbl.clone();
+        Rc::new(move |pb: gdk_pixbuf::Pixbuf, nm: String, info: Option<SvgInfo>, tip: Option<String>| {
+            let (pw, ph) = (pb.width(), pb.height());
+            let is_svg = info.is_some();
+            file_lbl.set_text(&format!("{nm}  \u{b7}  {pw}\u{d7}{ph}"));
+            file_lbl.set_tooltip_text(tip.as_deref());
+            pal_btn.set_label(if is_svg { "Palette from SVG" } else { "Palette from image" });
+            pal_btn.set_tooltip_text(Some(if is_svg {
+                "The colours the file DECLARES \u{2014} exact, not sampled"
+            } else {
+                "The image's dominant colours, quantised from its pixels"
+            }));
+            *name.borrow_mut() = nm;
+            *pixbuf.borrow_mut() = Some(pb);
+            *svg.borrow_mut() = info;
+            *out.borrow_mut() = None; // a new image drops any old build/template
+            *place.borrow_mut() = Placement::cover(pw, ph, canvas.get());
+            ctl.set_visible(true);
+            b_grid.set_sensitive(true);
+            for b in [&b_fit, &b_cover, &b_centre, &b_11] {
+                b.set_sensitive(true);
+            }
+            pal_btn.set_sensitive(true);
+            tpl.set_visible(true);
+            for b in [&b_alpha, &b_white, &b_solid, &b_grad, &b_reset] {
+                b.set_sensitive(true);
+            }
+            bld.set_visible(true);
+            b_invert.set_sensitive(true);
+            b_square.set_sensitive(true);
+            sq_scale.set_sensitive(true);
+            b_save.set_sensitive(false);
+            area.queue_draw();
+            rebuild_inspect();
+        })
+    };
+
+    // Show the browse-list entry at `i` (wrapping is the caller's job) and update
+    // the position readout. The list drives it, so the same nav will later serve
+    // the published manifest's covers, not only a folder.
+    let show_index: Rc<dyn Fn(usize)> = {
+        let browse = browse.clone();
+        let browse_idx = browse_idx.clone();
+        let set_image = set_image.clone();
+        let nav_lbl = nav_lbl.clone();
+        let window = window.clone();
+        Rc::new(move |i: usize| {
+            let (path, total) = {
+                let list = browse.borrow();
+                if list.is_empty() {
+                    return;
+                }
+                let i = i % list.len();
+                (list[i].clone(), list.len())
+            };
+            match load_image_file(&path) {
+                Ok((pb, nm, info)) => {
+                    let i = i % total;
+                    browse_idx.set(i);
+                    nav_lbl.set_text(&format!("{} / {total}  \u{b7}  {nm}", i + 1));
+                    set_image(pb, nm, info, Some(path.to_string_lossy().into_owned()));
+                }
+                // A broken file mid-scroll should not stop the scroll; say which.
+                Err(e) => show_error(&window, &format!("{e:#}")),
+            }
+        })
+    };
+
     open_btn.connect_clicked(clone!(
         #[weak]
         window,
         #[strong]
-        canvas,
+        set_image,
         #[strong]
-        pixbuf,
-        #[strong]
-        name,
-        #[strong]
-        place,
+        browse,
         #[weak]
-        ctl,
-        #[weak]
-        b_grid,
-        #[weak]
-        b_fit,
-        #[weak]
-        b_cover,
-        #[weak]
-        b_centre,
-        #[weak]
-        b_11,
-        #[strong]
-        svg,
-        #[strong]
-        out,
-        #[weak]
-        tpl,
-        #[weak]
-        b_alpha,
-        #[weak]
-        b_white,
-        #[weak]
-        b_solid,
-        #[weak]
-        b_grad,
-        #[weak]
-        b_reset,
-        #[weak]
-        b_save,
-        #[weak]
-        bld,
-        #[weak]
-        b_invert,
-        #[weak]
-        b_square,
-        #[weak]
-        sq_scale,
-        #[strong]
-        rebuild_inspect,
-        #[weak]
-        area,
-        #[weak]
-        file_lbl,
-        #[weak]
-        pal_btn,
+        nav,
         move |_| {
             let filter = gtk::FileFilter::new();
             filter.set_name(Some("Images (PNG / SVG / JPEG / WebP)"));
@@ -2115,132 +2197,22 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
                     #[weak]
                     window,
                     #[strong]
-                    canvas,
+                    set_image,
                     #[strong]
-                    pixbuf,
-                    #[strong]
-                    name,
-                    #[strong]
-                    place,
+                    browse,
                     #[weak]
-                    ctl,
-                    #[weak]
-                    b_grid,
-                    #[weak]
-                    b_fit,
-                    #[weak]
-                    b_cover,
-                    #[weak]
-                    b_centre,
-                    #[weak]
-                    b_11,
-                    #[strong]
-                    svg,
-                    #[strong]
-                    out,
-                    #[weak]
-                    tpl,
-                    #[weak]
-                    b_alpha,
-                    #[weak]
-                    b_white,
-                    #[weak]
-                    b_solid,
-                    #[weak]
-                    b_grad,
-                    #[weak]
-                    b_reset,
-                    #[weak]
-                    b_save,
-                    #[weak]
-                    bld,
-                    #[weak]
-                    b_invert,
-                    #[weak]
-                    b_square,
-                    #[weak]
-                    sq_scale,
-                    #[strong]
-                    rebuild_inspect,
-                    #[weak]
-                    area,
-                    #[weak]
-                    file_lbl,
-                    #[weak]
-                    pal_btn,
+                    nav,
                     move |res| {
                         let Ok(file) = res else { return };
                         let Some(path) = file.path() else { return };
-                        // SVG has no intrinsic pixel size worth trusting, so
-                        // rasterise it big enough to interrogate. PNG/JPEG load
-                        // at their own size.
-                        let is_svg = path
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
-                        let loaded = if is_svg {
-                            gdk_pixbuf::Pixbuf::from_file_at_scale(&path, 1024, 1024, true)
-                        } else {
-                            gdk_pixbuf::Pixbuf::from_file(&path)
-                        };
-                        match loaded {
-                            Ok(pb) => {
-                                let n = path
-                                    .file_name()
-                                    .and_then(|s| s.to_str())
-                                    .unwrap_or("image")
-                                    .to_string();
-                                // An SVG gets read as well as rendered: the
-                                // rasterisation is for looking at, the parse is
-                                // for knowing.
-                                let info = if is_svg {
-                                    fs::read_to_string(&path)
-                                        .ok()
-                                        .and_then(|t| inspect_svg(&t).ok())
-                                } else {
-                                    None
-                                };
-                                file_lbl.set_text(&format!(
-                                    "{n}  ·  {}×{}",
-                                    pb.width(),
-                                    pb.height()
-                                ));
-                                file_lbl.set_tooltip_text(Some(&path.to_string_lossy()));
-                                pal_btn.set_label(if info.is_some() {
-                                    "Palette from SVG"
-                                } else {
-                                    "Palette from image"
-                                });
-                                pal_btn.set_tooltip_text(Some(if info.is_some() {
-                                    "The colours the file DECLARES — exact, not sampled"
-                                } else {
-                                    "The image's dominant colours, quantised from its pixels"
-                                }));
-                                let (pw, ph) = (pb.width(), pb.height());
-                                *name.borrow_mut() = n;
-                                *pixbuf.borrow_mut() = Some(pb);
-                                *svg.borrow_mut() = info;
-                                *out.borrow_mut() = None; // a new image drops any old template
-                                *place.borrow_mut() = Placement::cover(pw, ph, canvas.get());
-                                ctl.set_visible(true);
-                                b_grid.set_sensitive(true);
-                                for b in [&b_fit, &b_cover, &b_centre, &b_11] {
-                                    b.set_sensitive(true);
-                                }
-                                pal_btn.set_sensitive(true);
-                                tpl.set_visible(true);
-                                for b in [&b_alpha, &b_white, &b_solid, &b_grad, &b_reset] {
-                                    b.set_sensitive(true);
-                                }
-                                bld.set_visible(true);
-                                b_invert.set_sensitive(true);
-                                b_square.set_sensitive(true);
-                                sq_scale.set_sensitive(true);
-                                b_save.set_sensitive(false);
-                                area.queue_draw();
-                                rebuild_inspect();
+                        match load_image_file(&path) {
+                            Ok((pb, nm, info)) => {
+                                set_image(pb, nm, info, Some(path.to_string_lossy().into_owned()));
+                                // A single Open leaves browse mode.
+                                browse.borrow_mut().clear();
+                                nav.set_visible(false);
                             }
-                            Err(e) => show_error(&window, &format!("Could not open: {e}")),
+                            Err(e) => show_error(&window, &format!("{e:#}")),
                         }
                     }
                 ),
@@ -2248,99 +2220,135 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         }
     ));
 
-    // Blank loads a white canvas by the SAME path a file does — it just
-    // synthesises the pixbuf instead of reading one — so everything downstream
-    // (framing, build ops, disc, save) works with no special case. The source is
-    // a generous flat white; scaling flat white costs nothing and never degrades.
+    browse_btn.connect_clicked(clone!(
+        #[weak]
+        window,
+        #[strong]
+        browse,
+        #[strong]
+        show_index,
+        #[weak]
+        nav,
+        #[weak]
+        area,
+        move |_| {
+            let dlg = gtk::FileDialog::builder()
+                .title("Browse a folder of images")
+                .build();
+            dlg.select_folder(
+                Some(&window),
+                gio::Cancellable::NONE,
+                clone!(
+                    #[weak]
+                    window,
+                    #[strong]
+                    browse,
+                    #[strong]
+                    show_index,
+                    #[weak]
+                    nav,
+                    #[weak]
+                    area,
+                    move |res| {
+                        let Ok(f) = res else { return };
+                        let Some(dir) = f.path() else { return };
+                        let mut imgs = Vec::new();
+                        let _ = find_images(&dir, "", &mut imgs);
+                        imgs.sort();
+                        if imgs.is_empty() {
+                            show_error(&window, "No images in that folder.");
+                            return;
+                        }
+                        *browse.borrow_mut() = imgs;
+                        nav.set_visible(true);
+                        show_index(0);
+                        // Focus the canvas so the arrow keys drive the scroll.
+                        area.grab_focus();
+                    }
+                ),
+            );
+        }
+    ));
+
+    // Prev/Next wrap — scrolling a collection should not dead-end at the last
+    // cover. The buttons are the reliable path; the arrow keys mirror them.
+    let step = {
+        let browse = browse.clone();
+        let browse_idx = browse_idx.clone();
+        let show_index = show_index.clone();
+        Rc::new(move |forward: bool| {
+            let n = browse.borrow().len();
+            if n == 0 {
+                return;
+            }
+            let cur = browse_idx.get();
+            let i = if forward { (cur + 1) % n } else { (cur + n - 1) % n };
+            show_index(i);
+        })
+    };
+    b_prev.connect_clicked(clone!(
+        #[strong]
+        step,
+        move |_| step(false)
+    ));
+    b_next.connect_clicked(clone!(
+        #[strong]
+        step,
+        move |_| step(true)
+    ));
+
+    // Arrow keys on the canvas mirror the buttons while browsing. On the canvas,
+    // not the window, so they cannot fight the slider's own left/right or steal
+    // keys from the batch filter entry.
+    let keys = gtk::EventControllerKey::new();
+    keys.connect_key_pressed(clone!(
+        #[strong]
+        step,
+        #[strong]
+        browse,
+        move |_, key, _, _| {
+            if browse.borrow().is_empty() {
+                return glib::Propagation::Proceed;
+            }
+            match key {
+                gtk::gdk::Key::Left => {
+                    step(false);
+                    glib::Propagation::Stop
+                }
+                gtk::gdk::Key::Right => {
+                    step(true);
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
+            }
+        }
+    ));
+    area.set_focusable(true);
+    area.add_controller(keys);
+
+
+    // Blank goes through the SAME set_image path a file does — it just
+    // synthesises the pixbuf instead of reading one. The source is a generous
+    // flat white; scaling flat white costs nothing and never degrades. No path,
+    // so no hover tooltip. A blank also leaves browse mode.
     blank_btn.connect_clicked(clone!(
         #[weak]
         window,
         #[strong]
-        canvas,
+        set_image,
         #[strong]
-        pixbuf,
-        #[strong]
-        name,
-        #[strong]
-        place,
-        #[strong]
-        svg,
-        #[strong]
-        out,
+        browse,
         #[weak]
-        ctl,
-        #[weak]
-        b_grid,
-        #[weak]
-        b_fit,
-        #[weak]
-        b_cover,
-        #[weak]
-        b_centre,
-        #[weak]
-        b_11,
-        #[weak]
-        pal_btn,
-        #[weak]
-        tpl,
-        #[weak]
-        b_alpha,
-        #[weak]
-        b_white,
-        #[weak]
-        b_solid,
-        #[weak]
-        b_grad,
-        #[weak]
-        b_reset,
-        #[weak]
-        b_save,
-        #[weak]
-        bld,
-        #[weak]
-        b_invert,
-        #[weak]
-        b_square,
-        #[weak]
-        sq_scale,
-        #[strong]
-        rebuild_inspect,
-        #[weak]
-        area,
-        #[weak]
-        file_lbl,
+        nav,
         move |_| {
-            let pb = match blank_canvas(1000) {
-                Ok(pb) => pb,
-                Err(e) => {
-                    show_error(&window, &format!("Could not create a blank canvas: {e}"));
-                    return;
+            match blank_canvas(1000) {
+                Ok(pb) => {
+                    set_image(pb, "blank".to_string(), None, None);
+                    browse.borrow_mut().clear();
+                    nav.set_visible(false);
                 }
-            };
-            *name.borrow_mut() = "blank.png".to_string();
-            *place.borrow_mut() = Placement::cover(pb.width(), pb.height(), canvas.get());
-            *pixbuf.borrow_mut() = Some(pb);
-            *svg.borrow_mut() = None;
-            *out.borrow_mut() = None;
-            file_lbl.set_text("blank");
-            pal_btn.set_tooltip_text(Some("The image's dominant colours, quantised from its pixels"));
-            ctl.set_visible(true);
-            b_grid.set_sensitive(true);
-            for b in [&b_fit, &b_cover, &b_centre, &b_11] {
-                b.set_sensitive(true);
+                Err(e) => show_error(&window, &format!("Could not create a blank canvas: {e}")),
             }
-            pal_btn.set_sensitive(true);
-            tpl.set_visible(true);
-            for b in [&b_alpha, &b_white, &b_solid, &b_grad, &b_reset] {
-                b.set_sensitive(true);
-            }
-            bld.set_visible(true);
-            b_invert.set_sensitive(true);
-            b_square.set_sensitive(true);
-            sq_scale.set_sensitive(true);
-            b_save.set_sensitive(false);
-            area.queue_draw();
-            rebuild_inspect();
         }
     ));
 
@@ -3165,6 +3173,38 @@ impl Scope {
             guard_root: m.library_root.clone(),
         }
     }
+}
+
+/// Load one image path into the pieces the view needs: the pixbuf, a display
+/// name, and — for an SVG — its declared colours/fonts/structure. The single
+/// place a file becomes something on the canvas, shared by Open and the browser
+/// so they can never drift apart.
+fn load_image_file(path: &Path) -> Result<(gdk_pixbuf::Pixbuf, String, Option<SvgInfo>)> {
+    // SVG has no intrinsic pixel size worth trusting, so rasterise it big enough
+    // to interrogate. PNG/JPEG/WebP load at their own size.
+    let is_svg = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+    let pb = if is_svg {
+        gdk_pixbuf::Pixbuf::from_file_at_scale(path, 1024, 1024, true)
+    } else {
+        gdk_pixbuf::Pixbuf::from_file(path)
+    }
+    .with_context(|| format!("could not open {}", path.display()))?;
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("image")
+        .to_string();
+    // An SVG is read as well as rendered: the raster is for looking at, the parse
+    // is for knowing.
+    let info = if is_svg {
+        fs::read_to_string(path).ok().and_then(|t| inspect_svg(&t).ok())
+    } else {
+        None
+    };
+    Ok((pb, name, info))
 }
 
 /// Output path: the source tree's shape, mirrored under `out_root`. Always PNG —
