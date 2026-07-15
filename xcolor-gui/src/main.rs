@@ -21,6 +21,13 @@ use serde::{Deserialize, Serialize};
 const APP_ID: &str = "io.github.xjmzx.XColorGui";
 const HISTORY_LIMIT: usize = 32;
 
+/// How many of the most-recent history colours become the compact "History
+/// palette" — a readable strip you scan at a glance, not the whole 32-deep list.
+const HISTORY_PALETTE: usize = 10;
+
+/// How many palettes ride along on the Picker view beside the History palette.
+const PINNED_MAX: usize = 3;
+
 // ---------- color model ----------
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -142,6 +149,12 @@ struct AppData {
     history: Vec<Rgb>,
     #[serde(default)]
     palettes: Vec<Palette>,
+    /// The palettes shown compactly on the Picker view, most-recent first, by
+    /// NAME. Capped at [`PINNED_MAX`]. It is both "the last few you used" (using a
+    /// palette's swatch moves it to the front) and "the ones you chose" (the
+    /// Palettes view pins/unpins explicitly) — one list, so the two never fight.
+    #[serde(default)]
+    pinned: Vec<String>,
     /// Show the getting-started panel. Defaults TRUE — so a fresh install is
     /// onboarded, and an existing data.json (which has no such field) also gets
     /// it once, which is right: the features it describes are new to them too.
@@ -283,6 +296,8 @@ struct State {
     fmt_hsl: ToggleButton,
     history_list: ListBox,
     palettes_list: ListBox,
+    /// The compact strips on the Picker view: History palette + pinned palettes.
+    pinned_box: GBox,
 }
 
 type SharedState = Rc<RefCell<State>>;
@@ -319,6 +334,9 @@ fn refresh_history_ui(state: &State, window: &ApplicationWindow, shared: &Shared
         let row = build_color_row(*color, state.data.format, window, shared, idx, true);
         state.history_list.append(&row);
     }
+    // The History palette is derived from history, so it is never stale: whenever
+    // the list changes, its compact strip is rebuilt in the same breath.
+    refresh_pinned_ui(state, window, shared);
 }
 
 fn refresh_palettes_ui(state: &State, window: &ApplicationWindow, shared: &SharedState) {
@@ -329,6 +347,157 @@ fn refresh_palettes_ui(state: &State, window: &ApplicationWindow, shared: &Share
         let row = build_palette_row(pal.clone(), idx, window, shared);
         state.palettes_list.append(&row);
     }
+}
+
+/// Both palette surfaces at once. Anything that changes the palettes OR the pins
+/// must call this, or the Palettes view and the Picker's compact strips drift.
+fn refresh_palettes_all(state: &State, window: &ApplicationWindow, shared: &SharedState) {
+    refresh_palettes_ui(state, window, shared);
+    refresh_pinned_ui(state, window, shared);
+}
+
+/// Is this palette currently pinned to the Picker view?
+fn is_pinned(data: &AppData, name: &str) -> bool {
+    data.pinned.iter().any(|n| n == name)
+}
+
+/// Move a palette to the front of the pinned list (most-recent), capped. Used
+/// both by an explicit pin and by "you just used this palette".
+fn pin_to_front(data: &mut AppData, name: &str) {
+    data.pinned.retain(|n| n != name);
+    data.pinned.insert(0, name.to_string());
+    data.pinned.truncate(PINNED_MAX);
+}
+
+/// Toggle a pin. Returns the new state. Pinning caps at [`PINNED_MAX`], dropping
+/// the oldest — the Picker view has room for a few, not a library.
+fn toggle_pin(data: &mut AppData, name: &str) -> bool {
+    if let Some(pos) = data.pinned.iter().position(|n| n == name) {
+        data.pinned.remove(pos);
+        false
+    } else {
+        pin_to_front(data, name);
+        true
+    }
+}
+
+/// Rebuild the Picker view's compact strips: the History palette, then the
+/// pinned palettes (resolved by name, newest first). This is the small,
+/// scan-at-a-glance surface; the full editable list lives in the Palettes view.
+fn refresh_pinned_ui(state: &State, window: &ApplicationWindow, shared: &SharedState) {
+    while let Some(child) = state.pinned_box.first_child() {
+        state.pinned_box.remove(&child);
+    }
+
+    let hist: Vec<Rgb> = state
+        .data
+        .history
+        .iter()
+        .take(HISTORY_PALETTE)
+        .copied()
+        .collect();
+    if hist.is_empty() {
+        let empty = Label::new(Some("Pick a colour — your recent colours collect here as a palette."));
+        empty.add_css_class("dim-label");
+        empty.set_wrap(true);
+        empty.set_xalign(0.0);
+        state.pinned_box.append(&empty);
+    } else {
+        state.pinned_box.append(&build_compact_strip(
+            "History",
+            &hist,
+            state.data.format,
+            window,
+            shared,
+        ));
+    }
+
+    let mut shown = 0;
+    for name in &state.data.pinned {
+        if shown >= PINNED_MAX {
+            break;
+        }
+        if let Some(p) = state.data.palettes.iter().find(|p| &p.name == name) {
+            let cols: Vec<Rgb> = p.colors.iter().map(|s| s.rgb).collect();
+            let title = if p.name.is_empty() {
+                "(unnamed)".to_string()
+            } else {
+                p.name.clone()
+            };
+            state.pinned_box.append(&build_compact_strip(
+                &title,
+                &cols,
+                state.data.format,
+                window,
+                shared,
+            ));
+            shown += 1;
+        }
+    }
+
+    if shown == 0 && !hist.is_empty() {
+        let hint = Label::new(Some("Pin palettes in the Palettes view to keep them here."));
+        hint.add_css_class("dim-label");
+        hint.set_wrap(true);
+        hint.set_xalign(0.0);
+        state.pinned_box.append(&hint);
+    }
+}
+
+/// A compact palette: a title over a wrapping row of small squares. Clicking a
+/// square selects and copies that colour — the same act as clicking a swatch
+/// anywhere else. Read-mostly: no edit affordances, that is the Palettes view's
+/// job.
+fn build_compact_strip(
+    title: &str,
+    colors: &[Rgb],
+    fmt: Format,
+    window: &ApplicationWindow,
+    shared: &SharedState,
+) -> GBox {
+    let strip = GBox::new(Orientation::Vertical, 3);
+    strip.set_margin_top(4);
+    strip.set_margin_bottom(4);
+
+    let head = Label::new(Some(&format!("{title}  ·  {}", colors.len())));
+    head.add_css_class("dim-label");
+    head.set_xalign(0.0);
+    strip.append(&head);
+
+    let flow = gtk::FlowBox::new();
+    flow.set_selection_mode(gtk::SelectionMode::None);
+    flow.set_max_children_per_line(16);
+    flow.set_column_spacing(3);
+    flow.set_row_spacing(3);
+    for color in colors {
+        let c = *color;
+        let chip = DrawingArea::new();
+        chip.set_size_request(22, 22);
+        chip.set_draw_func(move |_, cr, w, h| {
+            cr.set_source_rgb(c.r as f64 / 255.0, c.g as f64 / 255.0, c.b as f64 / 255.0);
+            cr.rectangle(0.0, 0.0, w as f64, h as f64);
+            let _ = cr.fill();
+        });
+        chip.set_tooltip_text(Some(&format!("{} — click to select + copy", c.format(fmt))));
+        let click = gtk::GestureClick::new();
+        click.connect_pressed(clone!(
+            #[strong]
+            shared,
+            #[weak]
+            window,
+            move |_, _, _, _| {
+                let mut s = shared.borrow_mut();
+                s.current = Some(c);
+                refresh_swatch(&s);
+                refresh_code(&s);
+                copy_to_clipboard(&window, &c.format(s.data.format));
+            }
+        ));
+        chip.add_controller(click);
+        flow.insert(&chip, -1);
+    }
+    strip.append(&flow);
+    strip
 }
 
 fn build_color_row(
@@ -442,6 +611,34 @@ fn build_palette_row(
     title.add_css_class("heading");
     header.append(&title);
 
+    // Pin toggle — decides whether this palette rides along on the Picker view.
+    // Reflects the current state so it is a status as much as a control.
+    let pin_name = pal.name.clone();
+    let pin_btn = ToggleButton::new();
+    pin_btn.set_icon_name("view-pin-symbolic");
+    pin_btn.set_active(is_pinned(&shared.borrow().data, &pin_name));
+    pin_btn.set_tooltip_text(Some(&format!(
+        "Pin to the Picker view (keeps up to {PINNED_MAX} beside History)"
+    )));
+    pin_btn.connect_toggled(clone!(
+        #[strong]
+        shared,
+        #[weak]
+        window,
+        move |_| {
+            {
+                let mut s = shared.borrow_mut();
+                toggle_pin(&mut s.data, &pin_name);
+                let _ = save_data(&s.data);
+            }
+            // Rebuilds the rows (so every pin toggle reflects the new cap) and
+            // the compact strips together.
+            let s = shared.borrow();
+            refresh_palettes_all(&s, &window, &shared);
+        }
+    ));
+    header.append(&pin_btn);
+
     let add_current = Button::from_icon_name("list-add-symbolic");
     add_current.set_tooltip_text(Some("Add current color"));
     add_current.connect_clicked(clone!(
@@ -463,7 +660,7 @@ fn build_palette_row(
                 let _ = save_data(&s.data);
             }
             let s = shared.borrow();
-            refresh_palettes_ui(&s, &window, &shared);
+            refresh_palettes_all(&s, &window, &shared);
         }
     ));
     header.append(&add_current);
@@ -492,18 +689,22 @@ fn build_palette_row(
             {
                 let mut s = shared.borrow_mut();
                 if idx < s.data.palettes.len() {
-                    s.data.palettes.remove(idx);
+                    let removed = s.data.palettes.remove(idx);
+                    // A deleted palette can no longer be pinned — drop it, or the
+                    // Picker view would try to resolve a name that is gone.
+                    s.data.pinned.retain(|n| n != &removed.name);
                 }
                 let _ = save_data(&s.data);
             }
             let s = shared.borrow();
-            refresh_palettes_ui(&s, &window, &shared);
+            refresh_palettes_all(&s, &window, &shared);
         }
     ));
     header.append(&del_btn);
 
     row.append(&header);
 
+    let pal_name = pal.name.clone();
     let chips = GBox::new(Orientation::Horizontal, 4);
     for (cidx, swatch) in pal.colors.iter().enumerate() {
         let color = &swatch.rgb;
@@ -518,6 +719,7 @@ fn build_palette_row(
         });
         let click = gtk::GestureClick::new();
         click.set_button(0); // any button
+        let pal_name = pal_name.clone();
         click.connect_pressed(clone!(
             #[strong]
             shared,
@@ -537,13 +739,29 @@ fn build_palette_row(
                         let _ = save_data(&s.data);
                     }
                     let s = shared.borrow();
-                    refresh_palettes_ui(&s, &window, &shared);
+                    refresh_palettes_all(&s, &window, &shared);
                 } else {
-                    let mut s = shared.borrow_mut();
-                    s.current = Some(c);
-                    refresh_swatch(&s);
-                    refresh_code(&s);
-                    copy_to_clipboard(&window, &c.format(s.data.format));
+                    // Using an UNPINNED palette brings it onto the Picker view —
+                    // "the last few you used". Already-pinned ones do not reorder,
+                    // to keep the strip from shuffling under every click.
+                    let newly_pinned = {
+                        let mut s = shared.borrow_mut();
+                        s.current = Some(c);
+                        refresh_swatch(&s);
+                        refresh_code(&s);
+                        copy_to_clipboard(&window, &c.format(s.data.format));
+                        if !pal_name.is_empty() && !is_pinned(&s.data, &pal_name) {
+                            pin_to_front(&mut s.data, &pal_name);
+                            let _ = save_data(&s.data);
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if newly_pinned {
+                        let s = shared.borrow();
+                        refresh_palettes_all(&s, &window, &shared);
+                    }
                 }
             }
         ));
@@ -599,7 +817,7 @@ fn import_palette(window: &ApplicationWindow, shared: &SharedState) {
                             let _ = save_data(&s.data);
                         }
                         let s = shared.borrow();
-                        refresh_palettes_ui(&s, &window, &shared);
+                        refresh_palettes_all(&s, &window, &shared);
                     }
                     Err(e) => show_error(&window, &format!("Import failed: {e}")),
                 }
@@ -637,6 +855,7 @@ fn build_tips(window: &ApplicationWindow, toggle: &ToggleButton) -> GBox {
         "Disc — mask what you framed. Corners can be alpha, white, a colour, or a gradient — taken from the colours you have picked.",
         "Size — 200 to 1000. Changing it keeps your framing: the square grows, the picture stays where you put it.",
         "Batch — the same recipe over a whole folder (a whole discography of cover.png), or over ndisc's PUBLISHED releases straight from the suite. Dry run first; it never writes into your source folder.",
+        "Palettes view — a second view (top of the window): your recent colours become a compact History palette, and you pin up to 3 palettes to ride along on the Picker.",
         "Palettes — Import (.gpl/.json), or build one and export to GPL / CSS / JSON. Named swatches keep their names.",
     ] {
         let l = Label::new(Some(&format!("•  {line}")));
@@ -2575,7 +2794,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
                 let _ = save_data(&s.data);
             }
             let s = shared.borrow();
-            refresh_palettes_ui(&s, &window, &shared);
+            refresh_palettes_all(&s, &window, &shared);
         }
     ));
 
@@ -3837,9 +4056,19 @@ fn build_ui(app: &Application) {
         .build();
 
     let header = HeaderBar::new();
-    let title = Label::new(Some("XColor Picker"));
-    title.add_css_class("title");
-    header.set_title_widget(Some(&title));
+    // The view switcher, as the title. Two linked toggles reading Picker /
+    // Palettes — the same segmented-control idea the suite's Tauri apps use for
+    // their nav, so a second view has an obvious home in the chrome rather than a
+    // button buried in a section.
+    let view_switch = GBox::new(Orientation::Horizontal, 0);
+    view_switch.add_css_class("linked");
+    let view_pick = ToggleButton::with_label("Picker");
+    let view_pal = ToggleButton::with_label("Palettes");
+    view_pal.set_group(Some(&view_pick));
+    view_pick.set_active(true);
+    view_switch.append(&view_pick);
+    view_switch.append(&view_pal);
+    header.set_title_widget(Some(&view_switch));
 
     // Tips toggle. One control, not two: a button that opens the panel and a
     // separate toggle that hides it would be two ways to say the same thing, and
@@ -3929,35 +4158,77 @@ fn build_ui(app: &Application) {
     hist_exp.set_child(Some(&history_scroll));
     outer.append(&hist_exp);
 
-    // palettes section
+    // palettes section (Picker view) — COMPACT now: the History palette + the
+    // pinned palettes as scan-at-a-glance strips. The full editable list moved to
+    // the Palettes view, so the left column is not two long lists deep.
     let pal_header = GBox::new(Orientation::Horizontal, 8);
     let pal_title = Label::new(Some("Palettes"));
     pal_title.add_css_class("section-head");
     pal_title.set_xalign(0.0);
     pal_title.set_hexpand(true);
     pal_header.append(&pal_title);
+    let manage_btn = Button::with_label("Palettes view →");
+    manage_btn.set_tooltip_text(Some("Manage all palettes: import, create, edit, pin"));
+    pal_header.append(&manage_btn);
+
+    let pinned_box = GBox::new(Orientation::Vertical, 4);
+    let pinned_scroll = gtk::ScrolledWindow::new();
+    pinned_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    pinned_scroll.set_min_content_height(120);
+    pinned_scroll.set_max_content_height(360);
+    pinned_scroll.set_vexpand(true);
+    pinned_scroll.set_child(Some(&pinned_box));
+
+    pal_header.set_hexpand(true);
+    let pal_exp = gtk::Expander::new(None);
+    pal_exp.set_label_widget(Some(&pal_header));
+    pal_exp.set_child(Some(&pinned_scroll));
+    outer.append(&pal_exp);
+
+    // The Palettes VIEW — the full, editable management surface, its own page.
+    let pal_view = GBox::new(Orientation::Vertical, 12);
+    pal_view.set_margin_top(16);
+    pal_view.set_margin_bottom(16);
+    pal_view.set_margin_start(16);
+    pal_view.set_margin_end(16);
+
+    let pv_head = GBox::new(Orientation::Horizontal, 8);
+    let pv_title = Label::new(Some("Palettes"));
+    pv_title.add_css_class("section-head");
+    pv_title.set_xalign(0.0);
+    pv_title.set_hexpand(true);
+    pv_head.append(&pv_title);
     let import_btn = Button::with_label("Import");
     import_btn.set_tooltip_text(Some(
         "Import a palette (.gpl / .json). Swatch names are kept.",
     ));
-    pal_header.append(&import_btn);
+    pv_head.append(&import_btn);
+    let save_hist_btn = Button::with_label("Save History as palette");
+    save_hist_btn.set_tooltip_text(Some(
+        "Snapshot the current History palette as a named, permanent palette",
+    ));
+    pv_head.append(&save_hist_btn);
     let new_pal_btn = Button::with_label("New palette");
-    pal_header.append(&new_pal_btn);
+    new_pal_btn.add_css_class("suggested-action");
+    pv_head.append(&new_pal_btn);
+    pal_view.append(&pv_head);
+
+    let pv_hint = Label::new(Some(
+        "The pin marks a palette to ride along on the Picker view (up to 3 beside History). Using a palette's colour pins it too.",
+    ));
+    pv_hint.add_css_class("dim-label");
+    pv_hint.set_wrap(true);
+    pv_hint.set_xalign(0.0);
+    pal_view.append(&pv_hint);
+
     let pal_scroll = gtk::ScrolledWindow::new();
     pal_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    pal_scroll.set_min_content_height(140);
-    pal_scroll.set_max_content_height(360);
     pal_scroll.set_vexpand(true);
     let palettes_list = ListBox::new();
     palettes_list.set_selection_mode(gtk::SelectionMode::None);
     palettes_list.add_css_class("boxed-list");
     pal_scroll.set_child(Some(&palettes_list));
-
-    pal_header.set_hexpand(true);
-    let pal_exp = gtk::Expander::new(None);
-    pal_exp.set_label_widget(Some(&pal_header));
-    pal_exp.set_child(Some(&pal_scroll));
-    outer.append(&pal_exp);
+    pal_view.append(&pal_scroll);
 
     // Two columns. A 400x400 image area stacked under the controls turned the
     // window into a ~1100px-tall strip; side by side, the controls keep their
@@ -3988,7 +4259,39 @@ fn build_ui(app: &Application) {
     columns.append(&Separator::new(Orientation::Vertical));
     columns.append(&image_slot);
 
-    window.set_child(Some(&columns));
+    // Two pages behind the header switch: the picker, and the full palettes view.
+    let stack = gtk::Stack::new();
+    stack.set_hexpand(true);
+    stack.set_vexpand(true);
+    stack.add_named(&columns, Some("picker"));
+    stack.add_named(&pal_view, Some("palettes"));
+    window.set_child(Some(&stack));
+
+    view_pick.connect_toggled(clone!(
+        #[weak]
+        stack,
+        move |b| {
+            if b.is_active() {
+                stack.set_visible_child_name("picker");
+            }
+        }
+    ));
+    view_pal.connect_toggled(clone!(
+        #[weak]
+        stack,
+        move |b| {
+            if b.is_active() {
+                stack.set_visible_child_name("palettes");
+            }
+        }
+    ));
+    // "Palettes view →" on the Picker just flips the same switch, so there is one
+    // source of truth for which page is showing.
+    manage_btn.connect_clicked(clone!(
+        #[weak]
+        view_pal,
+        move |_| view_pal.set_active(true)
+    ));
 
     // load and wire state
     let data = load_data();
@@ -4003,6 +4306,7 @@ fn build_ui(app: &Application) {
         fmt_hsl: fmt_hsl.clone(),
         history_list: history_list.clone(),
         palettes_list: palettes_list.clone(),
+        pinned_box: pinned_box.clone(),
     };
     let shared: SharedState = Rc::new(RefCell::new(state));
 
@@ -4104,7 +4408,7 @@ fn build_ui(app: &Application) {
         refresh_format_toggles(&s);
         refresh_code(&s);
         refresh_history_ui(&s, &window, &shared);
-        refresh_palettes_ui(&s, &window, &shared);
+        refresh_palettes_all(&s, &window, &shared);
     }
 
     // pick
@@ -4259,7 +4563,7 @@ fn build_ui(app: &Application) {
                         let _ = save_data(&s.data);
                     }
                     let s = shared.borrow();
-                    refresh_palettes_ui(&s, &window, &shared);
+                    refresh_palettes_all(&s, &window, &shared);
                     dlg.close();
                 }
             ));
@@ -4269,6 +4573,45 @@ fn build_ui(app: &Application) {
                 move |_| create.emit_clicked()
             ));
             dlg.present();
+        });
+    }
+
+    // Save History as a permanent palette. The History palette is derived and
+    // rolls over as you pick; this freezes the current one under a name so it
+    // stops being a moving target.
+    {
+        let shared = shared.clone();
+        let window = window.clone();
+        save_hist_btn.connect_clicked(move |_| {
+            let colors: Vec<Rgb> = {
+                let s = shared.borrow();
+                s.data.history.iter().take(HISTORY_PALETTE).copied().collect()
+            };
+            if colors.is_empty() {
+                show_error(&window, "History is empty — nothing to save yet.");
+                return;
+            }
+            {
+                let mut s = shared.borrow_mut();
+                // A stable, non-colliding default name; the row is renameable-by
+                // -export like any other, and you can edit it after.
+                let base = "History";
+                let taken: std::collections::HashSet<String> =
+                    s.data.palettes.iter().map(|p| p.name.clone()).collect();
+                let mut name = base.to_string();
+                let mut n = 2;
+                while taken.contains(&name) {
+                    name = format!("{base} ({n})");
+                    n += 1;
+                }
+                s.data.palettes.push(Palette {
+                    name,
+                    colors: colors.into_iter().map(Swatch::new).collect(),
+                });
+                let _ = save_data(&s.data);
+            }
+            let s = shared.borrow();
+            refresh_palettes_all(&s, &window, &shared);
         });
     }
 
@@ -4652,6 +4995,37 @@ mod sample_tests {
             pb.width() > CANVAS_DEFAULT && pb.height() > CANVAS_DEFAULT,
             "must overflow the canvas"
         );
+    }
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+
+    #[test]
+    fn pin_to_front_is_recency_deduped_and_capped() {
+        let mut d = AppData::default();
+        for n in ["a", "b", "c"] {
+            pin_to_front(&mut d, n);
+        }
+        assert_eq!(d.pinned, vec!["c", "b", "a"], "newest first");
+        // Re-using an existing one moves it to the front, does not duplicate.
+        pin_to_front(&mut d, "a");
+        assert_eq!(d.pinned, vec!["a", "c", "b"]);
+        // A fourth drops the oldest — the Picker view holds a few, not a library.
+        pin_to_front(&mut d, "d");
+        assert_eq!(d.pinned, vec!["d", "a", "c"]);
+        assert!(d.pinned.len() <= PINNED_MAX);
+    }
+
+    #[test]
+    fn toggle_pin_adds_then_removes() {
+        let mut d = AppData::default();
+        assert!(toggle_pin(&mut d, "x"), "first toggle pins");
+        assert!(is_pinned(&d, "x"));
+        assert!(!toggle_pin(&mut d, "x"), "second toggle unpins");
+        assert!(!is_pinned(&d, "x"));
+        assert!(d.pinned.is_empty());
     }
 }
 
