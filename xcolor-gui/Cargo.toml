@@ -21,3 +21,6 @@ serde_json = "1"
 dirs = "5"
 anyhow = "1"
 roxmltree = "0.20"
+# The batch run happens on a worker thread; this carries its progress back to
+# the GTK main loop. glib::MainContext::channel is gone in glib 0.20.
+async-channel = "2"

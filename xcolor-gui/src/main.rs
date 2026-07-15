@@ -1,8 +1,10 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use gio::prelude::*;
@@ -145,6 +147,10 @@ struct AppData {
     /// it once, which is right: the features it describes are new to them too.
     #[serde(default = "yes")]
     tips: bool,
+    /// The output canvas size. One of CANVAS_SIZES; anything else is ignored.
+    #[serde(default = "default_canvas")]
+    canvas: i32,
+
     /// Collapsed state per section, so the window comes back the way you left it.
     #[serde(default = "yes")]
     open_history: bool,
@@ -158,6 +164,10 @@ struct AppData {
     /// a demo file that keeps coming back is not a demo, it is litter.
     #[serde(default)]
     seeded: bool,
+}
+
+fn default_canvas() -> i32 {
+    CANVAS_DEFAULT
 }
 
 fn yes() -> bool {
@@ -623,6 +633,8 @@ fn build_tips(window: &ApplicationWindow, toggle: &ToggleButton) -> GBox {
         "samples/swatches.png — a raster only implies its colours, so “Palette from image” quantises them.",
         "samples/artwork.png — bigger than the canvas and not square, so it must be PLACED: drag to move, scroll to zoom, it snaps to the centre and edges.",
         "Disc — mask what you framed. Corners can be alpha, white, a colour, or a gradient — taken from the colours you have picked.",
+        "Size — 200 to 1000. Changing it keeps your framing: the square grows, the picture stays where you put it.",
+        "Batch — the same recipe over a whole folder (a whole discography of cover.png). Dry run first; it never writes into your source folder.",
         "Palettes — Import (.gpl/.json), or build one and export to GPL / CSS / JSON. Named swatches keep their names.",
     ] {
         let l = Label::new(Some(&format!("•  {line}")));
@@ -678,6 +690,417 @@ fn build_tips(window: &ApplicationWindow, toggle: &ToggleButton) -> GBox {
     b
 }
 
+/// The batch section: a recipe, a folder, and a run you can watch and stop.
+fn build_batch(
+    window: &ApplicationWindow,
+    shared: &SharedState,
+    canvas: Rc<Cell<i32>>,
+    size_dd: &gtk::DropDown,
+) -> gtk::Expander {
+    let src: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
+    let dst: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let body = GBox::new(Orientation::Vertical, 8);
+    body.set_margin_top(6);
+
+    // --- folders ---
+    let row_src = GBox::new(Orientation::Horizontal, 6);
+    let b_src = Button::with_label("Source…");
+    b_src.set_tooltip_text(Some("A folder of artwork. Searched recursively."));
+    let l_src = Label::new(Some("no source folder"));
+    l_src.add_css_class("dim-label");
+    l_src.set_ellipsize(gtk::pango::EllipsizeMode::Start);
+    l_src.set_xalign(0.0);
+    l_src.set_hexpand(true);
+    row_src.append(&b_src);
+    row_src.append(&l_src);
+    body.append(&row_src);
+
+    let row_dst = GBox::new(Orientation::Horizontal, 6);
+    let b_dst = Button::with_label("Output…");
+    b_dst.set_tooltip_text(Some(
+        "Where the results go. Never the source folder — your originals are not touched.",
+    ));
+    let l_dst = Label::new(Some("no output folder"));
+    l_dst.add_css_class("dim-label");
+    l_dst.set_ellipsize(gtk::pango::EllipsizeMode::Start);
+    l_dst.set_xalign(0.0);
+    l_dst.set_hexpand(true);
+    row_dst.append(&b_dst);
+    row_dst.append(&l_dst);
+    body.append(&row_dst);
+
+    // --- recipe ---
+    let row_r = GBox::new(Orientation::Horizontal, 6);
+
+    let e_match = gtk::Entry::new();
+    e_match.set_text("cover");
+    e_match.set_width_chars(10);
+    e_match.set_placeholder_text(Some("name filter"));
+    e_match.set_tooltip_text(Some(
+        "Only files whose name contains this. \u{201c}cover\u{201d} catches cover.png / cover.jpg across a music library. Empty = every image in the tree.",
+    ));
+    row_r.append(&e_match);
+
+    let dd_frame = gtk::DropDown::from_strings(&["Cover", "Fit"]);
+    dd_frame.set_tooltip_text(Some(
+        "Cover fills the square (edges cropped); Fit puts the whole image inside it.\n\nThese are the only framings that mean anything across a folder — a dragged placement is about ONE image's dimensions.",
+    ));
+    row_r.append(&dd_frame);
+
+    let dd_disc = gtk::DropDown::from_strings(&["No disc", "Alpha", "White", "Colour", "Gradient"]);
+    dd_disc.set_tooltip_text(Some(
+        "Disc mask + corner fill. Colour/Gradient take the colours you have picked, exactly as the single-image Disc buttons do.",
+    ));
+    row_r.append(&dd_disc);
+
+    let size_note = Label::new(None);
+    size_note.add_css_class("dim-label");
+    size_note.set_hexpand(true);
+    size_note.set_xalign(1.0);
+    row_r.append(&size_note);
+    body.append(&row_r);
+
+    // --- run ---
+    let row_go = GBox::new(Orientation::Horizontal, 6);
+    let b_dry = Button::with_label("Dry run");
+    b_dry.set_tooltip_text(Some(
+        "List what WOULD be written, writing nothing. Every image is still opened and framed, so a file that would fail, fails here.",
+    ));
+    let b_run = Button::with_label("Run");
+    b_run.add_css_class("suggested-action");
+    let b_stop = Button::with_label("Stop");
+    b_stop.set_sensitive(false);
+    row_go.append(&b_dry);
+    row_go.append(&b_run);
+    row_go.append(&b_stop);
+    let l_prog = Label::new(None);
+    l_prog.add_css_class("dim-label");
+    l_prog.set_hexpand(true);
+    l_prog.set_xalign(1.0);
+    row_go.append(&l_prog);
+    body.append(&row_go);
+
+    let results = ListBox::new();
+    results.set_selection_mode(gtk::SelectionMode::None);
+    results.add_css_class("boxed-list");
+    let res_scroll = gtk::ScrolledWindow::new();
+    res_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    res_scroll.set_min_content_height(90);
+    res_scroll.set_max_content_height(240);
+    res_scroll.set_child(Some(&results));
+    body.append(&res_scroll);
+
+    // Folder pickers.
+    for (btn, slot, lbl, title) in [
+        (&b_src, &src, &l_src, "Source folder"),
+        (&b_dst, &dst, &l_dst, "Output folder"),
+    ] {
+        btn.connect_clicked(clone!(
+            #[weak]
+            window,
+            #[strong(rename_to = slot)]
+            slot.clone(),
+            #[weak(rename_to = lbl)]
+            lbl.clone(),
+            #[strong(rename_to = title)]
+            title.to_string(),
+            move |_| {
+                let dlg = gtk::FileDialog::builder().title(&title).build();
+                dlg.select_folder(
+                    Some(&window),
+                    gio::Cancellable::NONE,
+                    clone!(
+                        #[strong]
+                        slot,
+                        #[weak]
+                        lbl,
+                        move |res| {
+                            let Ok(f) = res else { return };
+                            let Some(p) = f.path() else { return };
+                            lbl.set_text(&p.display().to_string());
+                            *slot.borrow_mut() = Some(p);
+                        }
+                    ),
+                );
+            }
+        ));
+    }
+
+    // The recipe's size is the canvas size — one control, not a second copy of
+    // it that can disagree with what you are looking at.
+    // Watching the SAME dropdown, rather than holding a copy of the size that
+    // could drift out of step with the canvas you are looking at.
+    //
+    // The size is read from the DROPDOWN, not from `canvas` — GTK runs handlers
+    // in connection order, and this one is connected before the handler that
+    // writes `canvas`, so reading the cell here would render the size you just
+    // moved away from.
+    let note_from = |sel: u32| {
+        let c = sane_canvas(
+            CANVAS_SIZES
+                .get(sel as usize)
+                .copied()
+                .unwrap_or(CANVAS_DEFAULT),
+        );
+        format!("\u{2192} {c}\u{d7}{c} PNG")
+    };
+    size_note.set_text(&note_from(size_dd.selected()));
+    size_dd.connect_selected_notify(clone!(
+        #[weak(rename_to = note)]
+        size_note,
+        move |dd| note.set_text(&note_from(dd.selected()))
+    ));
+
+    let run = {
+        let window = window.clone();
+        let shared = shared.clone();
+        let canvas = canvas.clone();
+        let src = src.clone();
+        let dst = dst.clone();
+        let stop = stop.clone();
+        let e_match = e_match.clone();
+        let dd_frame = dd_frame.clone();
+        let dd_disc = dd_disc.clone();
+        let results = results.clone();
+        let l_prog = l_prog.clone();
+        let b_dry = b_dry.clone();
+        let b_run = b_run.clone();
+        let b_stop = b_stop.clone();
+        Rc::new(move |dry: bool| {
+            let (Some(s_root), Some(o_root)) = (src.borrow().clone(), dst.borrow().clone()) else {
+                show_error(&window, "Choose a source folder and an output folder.");
+                return;
+            };
+            if let Err(e) = guard_batch(&s_root, &o_root) {
+                show_error(&window, &format!("{e}"));
+                return;
+            }
+
+            // The disc fill resolves from the picked colours HERE, once, so every
+            // file in the run gets the same fill even if you pick while it runs.
+            let (cur, prev) = {
+                let st = shared.borrow();
+                (
+                    st.current.or_else(|| st.data.history.first().copied()),
+                    st.data.history.get(1).copied().or(st.current),
+                )
+            };
+            let disc = match dd_disc.selected() {
+                0 => None,
+                1 => Some(OuterFill::Alpha),
+                2 => Some(OuterFill::White),
+                3 => match cur {
+                    Some(c) => Some(OuterFill::Solid(c)),
+                    None => {
+                        show_error(&window, "Pick a colour first — that is the fill.");
+                        return;
+                    }
+                },
+                _ => match (cur, prev) {
+                    (Some(i), Some(o)) => Some(OuterFill::Gradient { inner: i, outer: o }),
+                    _ => {
+                        show_error(&window, "A gradient needs two colours — pick a second one.");
+                        return;
+                    }
+                },
+            };
+            let recipe = Recipe {
+                canvas: canvas.get(),
+                framing: if dd_frame.selected() == 1 {
+                    Framing::Fit
+                } else {
+                    Framing::Cover
+                },
+                disc,
+            };
+            let needle = e_match.text().to_string();
+
+            while let Some(c) = results.first_child() {
+                results.remove(&c);
+            }
+            l_prog.set_text("scanning…");
+            stop.store(false, Ordering::Relaxed);
+            b_dry.set_sensitive(false);
+            b_run.set_sensitive(false);
+            b_stop.set_sensitive(true);
+
+            let (tx, rx) = async_channel::unbounded::<BatchMsg>();
+            let worker_stop = stop.clone();
+            let s_root2 = s_root.clone();
+            std::thread::spawn(move || {
+                // Discovery is on the worker too: walking a music library is
+                // thousands of directories, and a frozen window during the
+                // "scanning…" step is still a frozen window.
+                let mut files = Vec::new();
+                if let Err(e) = find_images(&s_root2, &needle, &mut files) {
+                    let _ = tx.send_blocking(BatchMsg::One {
+                        rel: s_root2.display().to_string(),
+                        result: Err(format!("{e}")),
+                    });
+                }
+                let _ = tx.send_blocking(BatchMsg::Total(files.len()));
+
+                let (mut ok, mut failed) = (0usize, 0usize);
+                let mut stopped = false;
+                for f in files {
+                    if worker_stop.load(Ordering::Relaxed) {
+                        stopped = true;
+                        break;
+                    }
+                    let rel = f.strip_prefix(&s_root2).unwrap_or(&f).to_path_buf();
+                    let result = batch_one(&f, &rel, &o_root, recipe, dry)
+                        .map_err(|e| format!("{e:#}")); // {:#} = the whole context chain
+                    match &result {
+                        Ok(_) => ok += 1,
+                        Err(_) => failed += 1,
+                    }
+                    let _ = tx.send_blocking(BatchMsg::One {
+                        rel: rel.display().to_string(),
+                        result,
+                    });
+                }
+                let _ = tx.send_blocking(BatchMsg::Done { ok, failed, stopped });
+            });
+
+            glib::spawn_future_local(clone!(
+                #[weak]
+                results,
+                #[weak]
+                l_prog,
+                #[weak]
+                b_dry,
+                #[weak]
+                b_run,
+                #[weak]
+                b_stop,
+                async move {
+                    let mut total = 0usize;
+                    let mut seen = 0usize;
+                    let mut failed = 0usize;
+                    let mut rows = 0usize;
+                    while let Ok(msg) = rx.recv().await {
+                        match msg {
+                            BatchMsg::Total(n) => {
+                                total = n;
+                                if n == 0 {
+                                    l_prog.set_text("nothing matched");
+                                }
+                            }
+                            BatchMsg::One { rel, result } => {
+                                seen += 1;
+                                let bad = result.is_err();
+                                if bad {
+                                    failed += 1;
+                                }
+                                // Failures ALWAYS get a row. Successes get one
+                                // until the list is full — you need to see what a
+                                // dry run would write, but you do not need to read
+                                // 12,000 of them.
+                                if bad || rows < RESULT_ROWS {
+                                    let l = Label::new(Some(&match &result {
+                                        Ok(d) => format!(
+                                            "{}  →  {}",
+                                            rel,
+                                            d.file_name()
+                                                .and_then(|s| s.to_str())
+                                                .unwrap_or("?")
+                                        ),
+                                        Err(e) => format!("{rel}  —  {e}"),
+                                    }));
+                                    l.set_xalign(0.0);
+                                    l.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+                                    l.set_margin_start(6);
+                                    l.set_margin_end(6);
+                                    if bad {
+                                        l.add_css_class("error");
+                                    } else {
+                                        l.add_css_class("dim-label");
+                                    }
+                                    results.append(&l);
+                                    rows += 1;
+                                }
+                                if seen % 16 == 0 || seen == total {
+                                    l_prog.set_text(&format!(
+                                        "{seen} / {total}{}",
+                                        if failed > 0 {
+                                            format!(" · {failed} failed")
+                                        } else {
+                                            String::new()
+                                        }
+                                    ));
+                                }
+                            }
+                            BatchMsg::Done { ok, failed, stopped } => {
+                                let verb = if stopped { "stopped" } else { "done" };
+                                l_prog.set_text(&format!(
+                                    "{verb} — {ok} {}{}",
+                                    if dry { "would be written" } else { "written" },
+                                    if failed > 0 {
+                                        format!(" · {failed} failed")
+                                    } else {
+                                        String::new()
+                                    }
+                                ));
+                                // Say what the list is NOT showing. A quiet cap
+                                // reads as "that was everything".
+                                if ok > rows.saturating_sub(failed) {
+                                    let l = Label::new(Some(&format!(
+                                        "… and {} more (list caps at {RESULT_ROWS}; every failure is shown)",
+                                        ok - rows.saturating_sub(failed)
+                                    )));
+                                    l.set_xalign(0.0);
+                                    l.add_css_class("dim-label");
+                                    l.set_margin_start(6);
+                                    results.append(&l);
+                                }
+                                b_dry.set_sensitive(true);
+                                b_run.set_sensitive(true);
+                                b_stop.set_sensitive(false);
+                                break;
+                            }
+                        }
+                    }
+                }
+            ));
+        })
+    };
+
+    b_dry.connect_clicked(clone!(
+        #[strong]
+        run,
+        move |_| run(true)
+    ));
+    b_run.connect_clicked(clone!(
+        #[strong]
+        run,
+        move |_| run(false)
+    ));
+    b_stop.connect_clicked(clone!(
+        #[strong]
+        stop,
+        move |_| stop.store(true, Ordering::Relaxed)
+    ));
+
+    let head = GBox::new(Orientation::Horizontal, 8);
+    let t = Label::new(Some("Batch"));
+    t.add_css_class("section-head");
+    t.set_xalign(0.0);
+    t.set_hexpand(true);
+    head.append(&t);
+    let hint = Label::new(Some("apply this recipe to a folder"));
+    hint.add_css_class("dim-label");
+    head.append(&hint);
+    head.set_hexpand(true);
+
+    let exp = gtk::Expander::new(None);
+    exp.set_label_widget(Some(&head));
+    exp.set_child(Some(&body));
+    exp.set_expanded(false);
+    exp
+}
+
 fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     // The loaded image, shared between the draw handler, the click handler and
     // the palette button.
@@ -697,6 +1120,9 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         scale: 1.0,
     }));
     let grid_on: Rc<RefCell<bool>> = Rc::new(RefCell::new(true));
+    // The output size, live. Everything that draws or exports reads it here
+    // rather than from a constant.
+    let canvas: Rc<Cell<i32>> = Rc::new(Cell::new(sane_canvas(shared.borrow().data.canvas)));
     // Which guides fired on the last move — drawn so you can SEE why the image
     // stopped. A snap you cannot see is just a bug.
     let snapped: Rc<RefCell<(bool, bool)>> = Rc::new(RefCell::new((false, false)));
@@ -730,12 +1156,18 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
 
     // ---- placement controls -----------------------------------------------
     let ctl = GBox::new(Orientation::Horizontal, 6);
-    let ctl_lbl = Label::new(Some(&format!("{CANVAS}×{CANVAS}")));
-    ctl_lbl.add_css_class("dim-label");
-    ctl_lbl.set_tooltip_text(Some(
-        "The output is always this size. Drag to reposition, scroll to zoom.",
+    let sizes: Vec<String> = CANVAS_SIZES.iter().map(|n| format!("{n}×{n}")).collect();
+    let size_dd = gtk::DropDown::from_strings(&sizes.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    size_dd.set_selected(
+        CANVAS_SIZES
+            .iter()
+            .position(|n| *n == canvas.get())
+            .unwrap_or(1) as u32,
+    );
+    size_dd.set_tooltip_text(Some(
+        "Output size. Changing it keeps your framing — the square around the picture grows, the picture does not move.",
     ));
-    ctl.append(&ctl_lbl);
+    ctl.append(&size_dd);
 
     let b_grid = ToggleButton::with_label("Grid");
     b_grid.set_active(true);
@@ -767,6 +1199,8 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     area.add_css_class("frame");
 
     area.set_draw_func(clone!(
+        #[strong]
+        canvas,
         #[strong]
         pixbuf,
         #[strong]
@@ -801,14 +1235,15 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
 
             // The CANVAS is what is fitted into the widget — not the image. The
             // image lives on the canvas, and may hang off its edges.
-            let (ox, oy, view) = fitted(CANVAS as f64, CANVAS as f64, w, h);
+            let cv = canvas.get();
+            let (ox, oy, view) = fitted(cv as f64, cv as f64, w, h);
             cr.save().ok();
             cr.translate(ox, oy);
             cr.scale(view, view);
 
             // Everything is clipped to the canvas: what falls outside the 400x400
             // is not in the output, so it must not be in the preview either.
-            cr.rectangle(0.0, 0.0, CANVAS as f64, CANVAS as f64);
+            cr.rectangle(0.0, 0.0, cv as f64, cv as f64);
             cr.clip();
 
             if let Some(pb) = out.borrow().clone() {
@@ -835,7 +1270,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
             // Grid — thirds, plus an emphasised centre cross. Drawn OVER the
             // image (it is a guide, not part of the picture) and never exported.
             if *grid_on.borrow() && out.borrow().is_none() {
-                let c = CANVAS as f64;
+                let c = cv as f64;
                 cr.set_line_width(1.0 / view);
                 cr.set_source_rgba(1.0, 1.0, 1.0, 0.18);
                 for i in 1..3 {
@@ -857,7 +1292,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
             // Snap guides — cyan, only while a guide is actually holding.
             let (sx, sy) = *snapped.borrow();
             if (sx || sy) && out.borrow().is_none() {
-                let c = CANVAS as f64;
+                let c = cv as f64;
                 cr.set_source_rgba(0.2, 0.9, 1.0, 0.9);
                 cr.set_line_width(1.5 / view);
                 if sx {
@@ -877,7 +1312,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
             // composing INTO.
             cr.set_source_rgba(1.0, 1.0, 1.0, 0.45);
             cr.set_line_width(1.0);
-            cr.rectangle(ox + 0.5, oy + 0.5, CANVAS as f64 * view - 1.0, CANVAS as f64 * view - 1.0);
+            cr.rectangle(ox + 0.5, oy + 0.5, cv as f64 * view - 1.0, cv as f64 * view - 1.0);
             let _ = cr.stroke();
         }
     ));
@@ -957,6 +1392,8 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     ));
     drag.connect_drag_update(clone!(
         #[strong]
+        canvas,
+        #[strong]
         place,
         #[strong]
         start,
@@ -975,9 +1412,10 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
             let Some(src) = pixbuf.borrow().clone() else { return };
             // Widget pixels -> canvas pixels. Without dividing by the view scale
             // the image would race ahead of (or lag) the cursor.
+            let cv = canvas.get();
             let (_, _, view) = fitted(
-                CANVAS as f64,
-                CANVAS as f64,
+                cv as f64,
+                cv as f64,
                 area.width() as f64,
                 area.height() as f64,
             );
@@ -987,7 +1425,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
                 dy: s0.dy + oy / view,
                 scale: s0.scale,
             };
-            let (p, sx, sy) = snap(want, src.width(), src.height());
+            let (p, sx, sy) = snap(want, src.width(), src.height(), cv);
             *place.borrow_mut() = p;
             *snapped.borrow_mut() = (sx, sy);
             area.queue_draw();
@@ -1009,6 +1447,8 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
     scroll.connect_scroll(clone!(
         #[strong]
+        canvas,
+        #[strong]
         place,
         #[strong]
         out,
@@ -1021,7 +1461,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
                 return glib::Propagation::Proceed;
             }
             let mut p = place.borrow_mut();
-            let c = CANVAS as f64 / 2.0;
+            let c = canvas.get() as f64 / 2.0;
             // Keep the canvas centre fixed under the zoom, so the thing you are
             // looking at does not fly off.
             let old = p.scale;
@@ -1053,25 +1493,19 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         let place = place.clone();
         let out = out.clone();
         let area = area.clone();
+        let canvas = canvas.clone();
         Rc::new(move |mode: u8| {
             let Some(src) = pixbuf.borrow().clone() else { return };
             if out.borrow().is_some() {
                 return;
             }
             let (sw, sh) = (src.width(), src.height());
-            let c = CANVAS as f64;
+            let cv = canvas.get();
+            let c = cv as f64;
             let mut p = place.borrow_mut();
             match mode {
-                0 => {
-                    // Fit: whole image inside, centred.
-                    let sc = (c / sw as f64).min(c / sh as f64);
-                    *p = Placement {
-                        scale: sc,
-                        dx: (c - sw as f64 * sc) / 2.0,
-                        dy: (c - sh as f64 * sc) / 2.0,
-                    };
-                }
-                1 => *p = Placement::cover(sw, sh),
+                0 => *p = Placement::fit(sw, sh, cv),
+                1 => *p = Placement::cover(sw, sh, cv),
                 2 => {
                     // Centre, keeping the current zoom.
                     p.dx = (c - p.w(sw)) / 2.0;
@@ -1138,10 +1572,56 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     tpl.set_visible(false);
     box_.append(&tpl);
 
+    box_.append(&build_batch(window, shared, canvas.clone(), &size_dd));
+
+    // Changing the output size RESCALES the framing rather than resetting it —
+    // you chose where the picture sits, and that decision survives a size change.
+    // A template already applied is dropped: it was rendered at the old size, and
+    // silently keeping it would mean the preview and the size picker disagree.
+    size_dd.connect_selected_notify(clone!(
+        #[strong]
+        canvas,
+        #[strong]
+        place,
+        #[strong]
+        out,
+        #[strong]
+        shared,
+        #[weak]
+        area,
+        #[weak]
+        b_save,
+        move |dd| {
+            let want = sane_canvas(
+                CANVAS_SIZES
+                    .get(dd.selected() as usize)
+                    .copied()
+                    .unwrap_or(CANVAS_DEFAULT),
+            );
+            let from = canvas.get();
+            if want == from {
+                return;
+            }
+            canvas.set(want);
+            *place.borrow_mut() = place.borrow().rescaled(from, want);
+            if out.borrow().is_some() {
+                *out.borrow_mut() = None;
+                b_save.set_sensitive(false);
+            }
+            {
+                let mut s = shared.borrow_mut();
+                s.data.canvas = want;
+                let _ = save_data(&s.data);
+            }
+            area.queue_draw();
+        }
+    ));
+
     let apply = {
         let pixbuf = pixbuf.clone();
         let place = place.clone();
         let out = out.clone();
+        let canvas = canvas.clone();
         let shared = shared.clone();
         let area = area.clone();
         let window = window.clone();
@@ -1178,14 +1658,14 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
             };
             // Compose onto the fixed canvas FIRST — the disc masks what you have
             // framed, not the original file.
-            let canvas = match compose(&src, *place.borrow()) {
+            let framed = match compose(&src, *place.borrow(), canvas.get()) {
                 Ok(c) => c,
                 Err(e) => {
                     show_error(&window, &format!("Canvas failed: {e}"));
                     return;
                 }
             };
-            match disc_template(&canvas, fill) {
+            match disc_template(&framed, fill) {
                 Ok(pb) => {
                     *out.borrow_mut() = Some(pb);
                     b_save.set_sensitive(true);
@@ -1363,6 +1843,8 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         #[weak]
         window,
         #[strong]
+        canvas,
+        #[strong]
         pixbuf,
         #[strong]
         name,
@@ -1424,6 +1906,8 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
                 clone!(
                     #[weak]
                     window,
+                    #[strong]
+                    canvas,
                     #[strong]
                     pixbuf,
                     #[strong]
@@ -1521,7 +2005,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
                                 *pixbuf.borrow_mut() = Some(pb);
                                 *svg.borrow_mut() = info;
                                 *out.borrow_mut() = None; // a new image drops any old template
-                                *place.borrow_mut() = Placement::cover(pw, ph);
+                                *place.borrow_mut() = Placement::cover(pw, ph, canvas.get());
                                 ctl.set_visible(true);
                                 b_grid.set_sensitive(true);
                                 for b in [&b_fit, &b_cover, &b_centre, &b_11] {
@@ -1857,13 +2341,29 @@ fn write_samples_into(dir: &Path) -> Result<usize> {
 
 // ---------- canvas + placement ----------
 //
-// The output is a FIXED 400x400 canvas. A source image of any dimensions is
-// PLACED on it — offset and scale — rather than being cropped to fit. So the
-// question stops being "how do we squeeze this in" and becomes "where on the
-// canvas does this go", which is the one the user is actually asking.
+// The output is a SQUARE canvas of a chosen size. A source image of any
+// dimensions is PLACED on it — offset and scale — rather than being cropped to
+// fit. So the question stops being "how do we squeeze this in" and becomes
+// "where on the canvas does this go", which is the one the user is actually
+// asking.
 
-/// The output size. Everything downstream — the disc, the save — is this square.
-const CANVAS: i32 = 400;
+/// The offered output sizes. A short list of round numbers, not a free number
+/// entry: an arbitrary 437x437 is not a decision anyone means to make, and every
+/// size here has to look right at a glance in the picker.
+const CANVAS_SIZES: [i32; 5] = [200, 400, 600, 800, 1000];
+
+/// The one you get until you say otherwise.
+const CANVAS_DEFAULT: i32 = 400;
+
+/// A stored size that is not one we offer is not honoured — it would be a canvas
+/// with no way to get back to it in the UI.
+fn sane_canvas(n: i32) -> i32 {
+    if CANVAS_SIZES.contains(&n) {
+        n
+    } else {
+        CANVAS_DEFAULT
+    }
+}
 
 /// How close (in canvas pixels) an edge or centre must come before it snaps.
 /// "Medium": firm enough to catch you, loose enough that you can sit 12px off
@@ -1881,12 +2381,34 @@ struct Placement {
 impl Placement {
     /// Scale to COVER the canvas, centred — the sane opening position: no gaps,
     /// nothing arbitrary cropped off one side.
-    fn cover(sw: i32, sh: i32) -> Placement {
-        let scale = (CANVAS as f64 / sw as f64).max(CANVAS as f64 / sh as f64);
+    fn cover(sw: i32, sh: i32, c: i32) -> Placement {
+        let scale = (c as f64 / sw as f64).max(c as f64 / sh as f64);
         Placement {
-            dx: (CANVAS as f64 - sw as f64 * scale) / 2.0,
-            dy: (CANVAS as f64 - sh as f64 * scale) / 2.0,
+            dx: (c as f64 - sw as f64 * scale) / 2.0,
+            dy: (c as f64 - sh as f64 * scale) / 2.0,
             scale,
+        }
+    }
+
+    /// Whole image inside the canvas, centred.
+    fn fit(sw: i32, sh: i32, c: i32) -> Placement {
+        let scale = (c as f64 / sw as f64).min(c as f64 / sh as f64);
+        Placement {
+            dx: (c as f64 - sw as f64 * scale) / 2.0,
+            dy: (c as f64 - sh as f64 * scale) / 2.0,
+            scale,
+        }
+    }
+
+    /// Rescale a framing from one canvas to another. Changing the output size
+    /// must not re-crop what you already framed — the picture stays where you
+    /// put it, the square around it just gets bigger.
+    fn rescaled(&self, from: i32, to: i32) -> Placement {
+        let k = to as f64 / from as f64;
+        Placement {
+            dx: self.dx * k,
+            dy: self.dy * k,
+            scale: self.scale * k,
         }
     }
     fn w(&self, sw: i32) -> f64 {
@@ -1903,8 +2425,8 @@ impl Placement {
 ///
 /// Returns the snapped placement plus which guides fired, so the view can SHOW
 /// why the image stopped moving. A snap you cannot see is just a bug.
-fn snap(p: Placement, sw: i32, sh: i32) -> (Placement, bool, bool) {
-    let (mut p, c) = (p, CANVAS as f64);
+fn snap(p: Placement, sw: i32, sh: i32, canvas: i32) -> (Placement, bool, bool) {
+    let (mut p, c) = (p, canvas as f64);
     let (iw, ih) = (p.w(sw), p.h(sh));
 
     // x: left edge, right edge, centre-to-centre.
@@ -1931,15 +2453,9 @@ fn snap(p: Placement, sw: i32, sh: i32) -> (Placement, bool, bool) {
 
 /// Render the placed source onto the fixed 400x400 canvas. Outside the image is
 /// transparent — the disc's corner fill decides what happens there, not this.
-fn compose(src: &gdk_pixbuf::Pixbuf, p: Placement) -> Result<gdk_pixbuf::Pixbuf> {
-    let dst = gdk_pixbuf::Pixbuf::new(
-        gdk_pixbuf::Colorspace::Rgb,
-        true,
-        8,
-        CANVAS,
-        CANVAS,
-    )
-    .context("could not allocate the canvas")?;
+fn compose(src: &gdk_pixbuf::Pixbuf, p: Placement, canvas: i32) -> Result<gdk_pixbuf::Pixbuf> {
+    let dst = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, true, 8, canvas, canvas)
+        .context("could not allocate the canvas")?;
     dst.fill(0x00000000);
 
     let (sw, sh) = (src.width(), src.height());
@@ -1947,8 +2463,8 @@ fn compose(src: &gdk_pixbuf::Pixbuf, p: Placement) -> Result<gdk_pixbuf::Pixbuf>
     let drow = dst.rowstride() as usize;
     let dbytes = unsafe { dst.pixels() };
 
-    for y in 0..CANVAS {
-        for x in 0..CANVAS {
+    for y in 0..canvas {
+        for x in 0..canvas {
             // Canvas pixel -> source pixel (nearest: a colour tool must not
             // invent colours that are in neither neighbour).
             let sx = ((x as f64 + 0.5 - p.dx) / p.scale).floor() as i32;
@@ -2099,6 +2615,174 @@ fn disc_template(src: &gdk_pixbuf::Pixbuf, fill: OuterFill) -> Result<gdk_pixbuf
         }
     }
     Ok(dst)
+}
+
+// ---------- batch ----------
+//
+// Templating one cover is a demo; templating a discography is the workflow. The
+// recipe is what you already dialled in on the canvas — size, framing, disc,
+// corner fill — applied across a folder.
+//
+// What CANNOT be batched is the drag: a hand-placed dx/dy means nothing on the
+// next image, which has different dimensions. So batch offers the two framings
+// that are defined for any source — Cover and Fit — and says so, rather than
+// pretending your placement generalises.
+
+/// What we will open. Anything else in the tree is simply not an image.
+const IMAGE_EXTS: [&str; 5] = ["png", "jpg", "jpeg", "webp", "svg"];
+
+/// How many result rows the list will show. Beyond this the run is still
+/// complete and still counted — the LIST is what is capped, and it says so.
+/// A silent truncation reads as "that was everything".
+const RESULT_ROWS: usize = 300;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Framing {
+    Cover,
+    Fit,
+}
+
+#[derive(Clone, Copy)]
+struct Recipe {
+    canvas: i32,
+    framing: Framing,
+    /// `None` = no disc: just the framed square. The disc is an option, not the
+    /// point — resizing a folder of covers is a job on its own.
+    disc: Option<OuterFill>,
+}
+
+/// Refuse a source/output pairing that would eat itself.
+///
+/// This is ntree's `guard_deletable` lesson in its non-destructive form: the
+/// output folder is a user-typed path, and the originals are the irreplaceable
+/// thing. Batch never writes into the source tree — not as an option, not with a
+/// confirmation. It also refuses output nested INSIDE the source, which would
+/// not overwrite anything but would make the next run batch its own output.
+fn guard_batch(src: &Path, out: &Path) -> Result<()> {
+    let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let (s, o) = (real(src), real(out));
+    if o == s {
+        anyhow::bail!("The output folder is the source folder. Batch never writes over your originals.");
+    }
+    if o.starts_with(&s) {
+        anyhow::bail!(
+            "The output folder is inside the source folder.\n\nNothing would be overwritten, but the next run would pick up its own output as input."
+        );
+    }
+    if s.starts_with(&o) {
+        anyhow::bail!("The source folder is inside the output folder. Choose an output folder beside it, not above it.");
+    }
+    Ok(())
+}
+
+/// Walk `root` for images whose filename contains `needle` (case-insensitively;
+/// empty matches everything). Hidden directories are skipped — nothing in a
+/// `.git` is artwork.
+fn find_images(root: &Path, needle: &str, into: &mut Vec<PathBuf>) -> Result<()> {
+    let needle = needle.to_lowercase();
+    let rd = fs::read_dir(root).with_context(|| format!("cannot read {}", root.display()))?;
+    let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+    entries.sort(); // a stable order, so a dry run and the real run agree
+    for path in entries {
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            // A folder we cannot read is not fatal to the whole run.
+            let _ = find_images(&path, &needle, into);
+            continue;
+        }
+        let ext_ok = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .is_some_and(|e| IMAGE_EXTS.contains(&e.as_str()));
+        if ext_ok && (needle.is_empty() || name.to_lowercase().contains(&needle)) {
+            into.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Output path: the source tree's shape, mirrored under `out_root`. Always PNG —
+/// an alpha corner fill has nowhere to live in a JPEG.
+fn batch_dest(rel: &Path, out_root: &Path, disc: bool) -> PathBuf {
+    let stem = rel
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("image")
+        .to_string();
+    let suffix = if disc { "-disc" } else { "" };
+    let mut p = out_root.to_path_buf();
+    if let Some(parent) = rel.parent() {
+        p.push(parent);
+    }
+    p.push(format!("{stem}{suffix}.png"));
+    p
+}
+
+/// One file, start to finish. `dry` computes the destination and does everything
+/// except write it — so a dry run exercises the same code path and can still
+/// fail on a file that would really fail.
+fn batch_one(src: &Path, rel: &Path, out_root: &Path, r: Recipe, dry: bool) -> Result<PathBuf> {
+    let is_svg = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+    let pb = if is_svg {
+        // An SVG has no pixel size worth trusting; rasterise it comfortably
+        // above any canvas we offer so scaling down is the only thing we do.
+        gdk_pixbuf::Pixbuf::from_file_at_scale(src, 1024, 1024, true)
+    } else {
+        gdk_pixbuf::Pixbuf::from_file(src)
+    }
+    .with_context(|| "could not read the image".to_string())?;
+
+    let (w, h) = (pb.width(), pb.height());
+    if w == 0 || h == 0 {
+        anyhow::bail!("empty image");
+    }
+    let place = match r.framing {
+        Framing::Cover => Placement::cover(w, h, r.canvas),
+        Framing::Fit => Placement::fit(w, h, r.canvas),
+    };
+    let framed = compose(&pb, place, r.canvas)?;
+    let final_pb = match r.disc {
+        Some(fill) => disc_template(&framed, fill)?,
+        None => framed,
+    };
+
+    let dest = batch_dest(rel, out_root, r.disc.is_some());
+    if dry {
+        return Ok(dest);
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("could not create {}", parent.display()))?;
+    }
+    final_pb
+        .savev(&dest, "png", &[])
+        .with_context(|| format!("could not write {}", dest.display()))?;
+    Ok(dest)
+}
+
+/// Progress from the worker thread. Deliberately carries the REASON on failure:
+/// "31 failed" is unactionable and sends you guessing at the tool from the
+/// outside — the single most valuable thing ntree's sampler learned.
+enum BatchMsg {
+    Total(usize),
+    One {
+        rel: String,
+        result: std::result::Result<PathBuf, String>,
+    },
+    Done {
+        ok: usize,
+        failed: usize,
+        stopped: bool,
+    },
 }
 
 // ---------- SVG introspection ----------
@@ -3131,18 +3815,18 @@ mod placement_tests {
     fn cover_centres_and_fills_the_canvas() {
         // A wide source: scaled so the SHORT axis reaches across, centred, with
         // the long axis overhanging equally both sides.
-        let p = Placement::cover(800, 400);
+        let p = Placement::cover(800, 400, 400);
         assert_eq!(p.scale, 1.0); // 400/400 on the short axis
         assert_eq!(p.dy, 0.0);
         assert_eq!(p.dx, -200.0); // (400 - 800) / 2
         // Nothing is left uncovered.
-        assert!(p.w(800) >= CANVAS as f64 && p.h(400) >= CANVAS as f64);
+        assert!(p.w(800) >= 400.0 && p.h(400) >= 400.0);
     }
 
     #[test]
     fn snaps_to_centre() {
         let p = Placement { dx: 3.0, dy: -4.0, scale: 1.0 }; // a 400x400 source
-        let (s, sx, sy) = snap(p, 400, 400);
+        let (s, sx, sy) = snap(p, 400, 400, 400);
         assert_eq!((s.dx, s.dy), (0.0, 0.0)); // centre == edges here
         assert!(sx && sy);
     }
@@ -3152,7 +3836,7 @@ mod placement_tests {
         // Snapped horizontally, free vertically — that is what makes it feel
         // like a guide and not a magnet.
         let p = Placement { dx: 2.0, dy: 100.0, scale: 1.0 };
-        let (s, sx, sy) = snap(p, 400, 400);
+        let (s, sx, sy) = snap(p, 400, 400, 400);
         assert_eq!(s.dx, 0.0);
         assert_eq!(s.dy, 100.0, "vertical was far from any guide; leave it alone");
         assert!(sx && !sy);
@@ -3162,7 +3846,7 @@ mod placement_tests {
     fn does_not_snap_beyond_the_threshold() {
         // You must be able to sit deliberately off-centre.
         let p = Placement { dx: 25.0, dy: 25.0, scale: 1.0 };
-        let (s, sx, sy) = snap(p, 400, 400);
+        let (s, sx, sy) = snap(p, 400, 400, 400);
         assert_eq!((s.dx, s.dy), (25.0, 25.0));
         assert!(!sx && !sy);
     }
@@ -3171,7 +3855,7 @@ mod placement_tests {
     fn snaps_a_small_image_to_the_canvas_centre() {
         // A 100x100 image: centre-to-centre means dx = (400-100)/2 = 150.
         let p = Placement { dx: 146.0, dy: 150.0, scale: 1.0 };
-        let (s, _, _) = snap(p, 100, 100);
+        let (s, _, _) = snap(p, 100, 100, 400);
         assert_eq!(s.dx, 150.0);
     }
 
@@ -3179,8 +3863,8 @@ mod placement_tests {
     fn compose_places_the_image_where_you_put_it() {
         let src = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, true, 8, 10, 10).unwrap();
         src.fill(0xFF0000FF);
-        let c = compose(&src, Placement { dx: 100.0, dy: 100.0, scale: 1.0 }).unwrap();
-        assert_eq!(c.width(), CANVAS);
+        let c = compose(&src, Placement { dx: 100.0, dy: 100.0, scale: 1.0 }, 400).unwrap();
+        assert_eq!(c.width(), 400);
         let b = unsafe { c.pixels() };
         let at = |x: i32, y: i32| {
             let i = y as usize * c.rowstride() as usize + x as usize * 4;
@@ -3247,6 +3931,152 @@ mod sample_tests {
         write_samples_into(&d).unwrap();
         let pb = gdk_pixbuf::Pixbuf::from_file(d.join("artwork.png")).unwrap();
         assert_ne!(pb.width(), pb.height(), "must be non-square");
-        assert!(pb.width() > CANVAS && pb.height() > CANVAS, "must overflow the canvas");
+        assert!(
+            pb.width() > CANVAS_DEFAULT && pb.height() > CANVAS_DEFAULT,
+            "must overflow the canvas"
+        );
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+
+    fn tmpdir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("xcolor-batch-{name}"));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn the_output_folder_may_not_be_the_source_folder() {
+        let d = tmpdir("same");
+        assert!(guard_batch(&d, &d).is_err(), "that would overwrite originals");
+    }
+
+    #[test]
+    fn the_output_folder_may_not_sit_inside_the_source() {
+        // Nothing gets overwritten, but the NEXT run would take its own output
+        // as input — the batch would compound on itself.
+        let src = tmpdir("nested");
+        let out = src.join("out");
+        fs::create_dir_all(&out).unwrap();
+        assert!(guard_batch(&src, &out).is_err());
+    }
+
+    #[test]
+    fn the_source_may_not_sit_inside_the_output() {
+        let out = tmpdir("parent");
+        let src = out.join("art");
+        fs::create_dir_all(&src).unwrap();
+        assert!(guard_batch(&src, &out).is_err());
+    }
+
+    #[test]
+    fn siblings_are_fine() {
+        let base = tmpdir("siblings");
+        let (src, out) = (base.join("in"), base.join("out"));
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&out).unwrap();
+        assert!(guard_batch(&src, &out).is_ok());
+    }
+
+    #[test]
+    fn the_destination_mirrors_the_source_tree() {
+        // The shape of the library is the only thing that tells 1,600 files named
+        // cover.png apart. Flatten it and they all land on each other.
+        let rel = Path::new("Autechre/Amber/cover.jpg");
+        let d = batch_dest(rel, Path::new("/tmp/out"), true);
+        assert_eq!(d, Path::new("/tmp/out/Autechre/Amber/cover-disc.png"));
+        // No disc: no suffix. Always PNG — alpha has nowhere to live in a JPEG.
+        let d = batch_dest(rel, Path::new("/tmp/out"), false);
+        assert_eq!(d, Path::new("/tmp/out/Autechre/Amber/cover.png"));
+    }
+
+    #[test]
+    fn discovery_recurses_filters_by_name_and_skips_hidden() {
+        let root = tmpdir("find");
+        let rel = root.join("Artist/Release");
+        fs::create_dir_all(&rel).unwrap();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        for f in ["cover.png", "back.png", "notes.txt"] {
+            fs::write(rel.join(f), b"x").unwrap();
+        }
+        fs::write(root.join(".git/cover.png"), b"x").unwrap();
+
+        let mut hits = Vec::new();
+        find_images(&root, "cover", &mut hits).unwrap();
+        assert_eq!(hits, vec![rel.join("cover.png")], "name filter + no dotdirs");
+
+        let mut all = Vec::new();
+        find_images(&root, "", &mut all).unwrap();
+        assert_eq!(all.len(), 2, "empty filter = every image, but .txt is not one");
+    }
+
+    #[test]
+    fn changing_the_output_size_keeps_the_framing() {
+        // Framing is a decision. Doubling the canvas must not re-crop it — the
+        // square grows, the picture stays where it was put.
+        let a = Placement::cover(800, 400, 400);
+        let b = a.rescaled(400, 800);
+        let direct = Placement::cover(800, 400, 800);
+        assert!((b.scale - direct.scale).abs() < 1e-9);
+        assert!((b.dx - direct.dx).abs() < 1e-9);
+        assert!((b.dy - direct.dy).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_stored_size_we_do_not_offer_is_not_honoured() {
+        // It would be a canvas with no way back to it in the picker.
+        assert_eq!(sane_canvas(437), CANVAS_DEFAULT);
+        assert_eq!(sane_canvas(1000), 1000);
+        assert!(CANVAS_SIZES.contains(&CANVAS_DEFAULT));
+    }
+
+    #[test]
+    fn batch_writes_a_square_png_at_the_chosen_size() {
+        let base = tmpdir("run");
+        let (src, out) = (base.join("in"), base.join("out"));
+        fs::create_dir_all(src.join("A/B")).unwrap();
+        // A deliberately non-square source: the point is that it gets PLACED.
+        let pb = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, true, 8, 90, 60).unwrap();
+        pb.fill(0x3366FFFF);
+        pb.savev(src.join("A/B/cover.png"), "png", &[]).unwrap();
+
+        let r = Recipe {
+            canvas: 200,
+            framing: Framing::Cover,
+            disc: Some(OuterFill::Alpha),
+        };
+        let rel = Path::new("A/B/cover.png");
+        let dest = batch_one(&src.join(rel), rel, &out, r, false).unwrap();
+        assert_eq!(dest, out.join("A/B/cover-disc.png"));
+        let got = gdk_pixbuf::Pixbuf::from_file(&dest).unwrap();
+        assert_eq!((got.width(), got.height()), (200, 200));
+        // Alpha corners: the disc is inscribed, so (0,0) is outside it.
+        let b = unsafe { got.pixels() };
+        assert_eq!(b[3], 0, "the corner must be transparent");
+    }
+
+    #[test]
+    fn a_dry_run_writes_nothing_but_still_opens_every_file() {
+        let base = tmpdir("dry");
+        let (src, out) = (base.join("in"), base.join("out"));
+        fs::create_dir_all(&src).unwrap();
+        let pb = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, true, 8, 40, 40).unwrap();
+        pb.savev(src.join("cover.png"), "png", &[]).unwrap();
+        let r = Recipe { canvas: 400, framing: Framing::Fit, disc: None };
+        let rel = Path::new("cover.png");
+
+        let dest = batch_one(&src.join(rel), rel, &out, r, true).unwrap();
+        assert_eq!(dest, out.join("cover.png"));
+        assert!(!dest.exists(), "a dry run writes nothing");
+
+        // And a file that would really fail, fails in the dry run too — that is
+        // what makes it worth running.
+        fs::write(src.join("broken-cover.png"), b"not a png").unwrap();
+        let bad = Path::new("broken-cover.png");
+        assert!(batch_one(&src.join(bad), bad, &out, r, true).is_err());
     }
 }
