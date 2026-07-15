@@ -802,7 +802,7 @@ fn build_tips(window: &ApplicationWindow, toggle: &ToggleButton) -> GBox {
     b.add_css_class("tips-card");
 
     let head = GBox::new(Orientation::Horizontal, 8);
-    let t = Label::new(Some("Getting started"));
+    let t = Label::new(Some("Quick start"));
     t.add_css_class("heading");
     t.set_xalign(0.0);
     t.set_hexpand(true);
@@ -811,27 +811,45 @@ fn build_tips(window: &ApplicationWindow, toggle: &ToggleButton) -> GBox {
     head.append(&close);
     b.append(&head);
 
-    for line in [
-        "Pick — grab any colour on screen. It lands in the history and the clipboard.",
-        "Image ▸ Open — artwork (PNG / SVG / JPEG / WebP). Click any pixel to pick from it.",
-        "Browse… — point at a FOLDER and scroll every cover in it with ◀ ▶ or the arrow keys.",
-        "samples/shapes.svg — an SVG STATES its colours: Inspect lists the exact fills with use counts, not a guess from pixels.",
-        "samples/disc-label.svg — Inspect also reads the FONTS and the text. For label art that is most of what you need.",
-        "samples/swatches.png — a raster only implies its colours, so “Palette from image” quantises them.",
-        "samples/artwork.png — bigger than the canvas and not square, so it must be PLACED: drag to move, scroll to zoom, it snaps to the centre and edges.",
-        "Blank + Build — start from a white canvas, Invert to a black one, and stamp centred black squares (scalable) to build label artwork from nothing. The ops stack.",
-        "Disc — mask what you framed. Corners can be alpha, white, a colour, or a gradient — taken from the colours you have picked.",
-        "Size — 200 to 1000. Changing it keeps your framing: the square grows, the picture stays where you put it.",
-        "Batch — the same recipe over a whole folder (a whole discography of cover.png), or over ndisc's PUBLISHED releases straight from the suite. Dry run first; it never writes into your source folder.",
-        "Palettes view — a second view (top of the window): your recent colours become a compact History palette, and you pin up to 3 palettes to ride along on the Picker.",
-        "Palettes — Import (.gpl/.json), or build one and export to GPL / CSS / JSON. Named swatches keep their names.",
-    ] {
-        let l = Label::new(Some(&format!("•  {line}")));
+    // A bullet, and a small sub-heading, built the same terse way.
+    let bullet = |b: &GBox, text: &str| {
+        let l = Label::new(Some(&format!("•  {text}")));
         l.set_xalign(0.0);
         l.set_wrap(true);
-        l.set_max_width_chars(46);
+        l.set_max_width_chars(48);
         l.add_css_class("dim-label");
         b.append(&l);
+    };
+    let subhead = |b: &GBox, text: &str| {
+        let l = Label::new(Some(text));
+        l.set_xalign(0.0);
+        l.set_margin_top(4);
+        l.add_css_class("section-head");
+        b.append(&l);
+    };
+
+    // What it does — one line each, no prose.
+    for line in [
+        "Pick any colour on screen → history + clipboard.",
+        "Image: Open a file, or Browse a folder (◀ ▶ / arrows).",
+        "Click any pixel in an image to pick it.",
+        "Build: Blank, Invert, stamp Squares, mask to a Disc — steps stack.",
+        "Palettes: recent colours form a History palette; pin up to 3.",
+        "Batch: one recipe over a folder or ndisc's published releases.",
+    ] {
+        bullet(&b, line);
+    }
+
+    // Formats & limits — the compatibility list, and the things it will NOT do.
+    subhead(&b, "Formats & limits");
+    for line in [
+        "Opens: PNG · SVG · JPEG · WebP.",
+        "Saves: PNG only.",
+        "SVG: reads its declared colours, fonts, text.",
+        "Canvas: square, 200–1000 px.",
+        "Batch never writes your source — Preview first.",
+    ] {
+        bullet(&b, line);
     }
 
     let row = GBox::new(Orientation::Horizontal, 6);
@@ -2911,7 +2929,7 @@ const APP_CSS: &str = "
     border-radius: 10px;
     padding: 10px;
   }
-  .tips-card label { font-size: 0.92em; }
+  .tips-card label { font-size: 0.86em; }
   .canvas-frame { border-radius: 6px; }
   expander title { padding: 2px 0; }
   /* Swatches must touch: the theme pads flowboxchild, which shows as a gap
