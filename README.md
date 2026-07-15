@@ -1,6 +1,6 @@
 # n.cover
 
-<img align="right" width="160" src="https://raw.githubusercontent.com/xjmzx/ncover/main/extra/n.circle.png">
+<img align="right" width="180" src="https://raw.githubusercontent.com/xjmzx/ncover/main/extra/icons/ncover-512.png">
 
 [![GitHub release](https://img.shields.io/github/v/release/xjmzx/ncover.svg)](https://github.com/xjmzx/ncover/releases)
 [![dependency status](https://deps.rs/repo/github/xjmzx/ncover/status.svg)](https://deps.rs/repo/github/xjmzx/ncover)
