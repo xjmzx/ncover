@@ -298,7 +298,6 @@ struct State {
     fmt_hex: ToggleButton,
     fmt_rgb: ToggleButton,
     fmt_hsl: ToggleButton,
-    history_list: ListBox,
     palettes_list: ListBox,
     /// The compact strips on the Picker view: History palette + pinned palettes.
     pinned_box: GBox,
@@ -331,15 +330,9 @@ fn refresh_format_toggles(state: &State) {
 }
 
 fn refresh_history_ui(state: &State, window: &ApplicationWindow, shared: &SharedState) {
-    while let Some(child) = state.history_list.first_child() {
-        state.history_list.remove(&child);
-    }
-    for (idx, color) in state.data.history.iter().enumerate() {
-        let row = build_color_row(*color, state.data.format, window, shared, idx, true);
-        state.history_list.append(&row);
-    }
-    // The History palette is derived from history, so it is never stale: whenever
-    // the list changes, its compact strip is rebuilt in the same breath.
+    // History no longer has a section of its own — it lives as the compact
+    // History palette in the Palettes area. "Refreshing history" is rebuilding
+    // that strip. The name stays so every caller reads the same.
     refresh_pinned_ui(state, window, shared);
 }
 
@@ -407,13 +400,40 @@ fn refresh_pinned_ui(state: &State, window: &ApplicationWindow, shared: &SharedS
         empty.set_xalign(0.0);
         state.pinned_box.append(&empty);
     } else {
-        state.pinned_box.append(&build_compact_strip(
-            "History",
-            &hist,
-            state.data.format,
-            window,
+        // The History strip is the compact strip plus a Clear — the only edit it
+        // gets, and the home for the clear that used to live in the old History
+        // section's header.
+        let strip = GBox::new(Orientation::Vertical, 3);
+        strip.set_margin_top(4);
+        strip.set_margin_bottom(4);
+        let head = GBox::new(Orientation::Horizontal, 6);
+        let lbl = Label::new(Some(&format!("History  ·  {}", hist.len())));
+        lbl.add_css_class("dim-label");
+        lbl.set_xalign(0.0);
+        lbl.set_hexpand(true);
+        head.append(&lbl);
+        let clear = Button::from_icon_name("edit-clear-symbolic");
+        clear.add_css_class("flat");
+        clear.set_tooltip_text(Some("Clear the colour history"));
+        clear.connect_clicked(clone!(
+            #[strong]
             shared,
+            #[weak]
+            window,
+            move |_| {
+                {
+                    let mut s = shared.borrow_mut();
+                    s.data.history.clear();
+                    let _ = save_data(&s.data);
+                }
+                let s = shared.borrow();
+                refresh_history_ui(&s, &window, &shared);
+            }
         ));
+        head.append(&clear);
+        strip.append(&head);
+        strip.append(&build_swatch_flow(&hist, state.data.format, window, shared));
+        state.pinned_box.append(&strip);
     }
 
     let mut shown = 0;
@@ -448,26 +468,14 @@ fn refresh_pinned_ui(state: &State, window: &ApplicationWindow, shared: &SharedS
     }
 }
 
-/// A compact palette: a title over a wrapping row of small squares. Clicking a
-/// square selects and copies that colour — the same act as clicking a swatch
-/// anywhere else. Read-mostly: no edit affordances, that is the Palettes view's
-/// job.
-fn build_compact_strip(
-    title: &str,
+/// A wrapping row of small square swatches. Clicking a square selects and copies
+/// that colour — the same act as clicking a swatch anywhere else.
+fn build_swatch_flow(
     colors: &[Rgb],
     fmt: Format,
     window: &ApplicationWindow,
     shared: &SharedState,
-) -> GBox {
-    let strip = GBox::new(Orientation::Vertical, 3);
-    strip.set_margin_top(4);
-    strip.set_margin_bottom(4);
-
-    let head = Label::new(Some(&format!("{title}  ·  {}", colors.len())));
-    head.add_css_class("dim-label");
-    head.set_xalign(0.0);
-    strip.append(&head);
-
+) -> gtk::FlowBox {
     let flow = gtk::FlowBox::new();
     flow.set_selection_mode(gtk::SelectionMode::None);
     // Ten to a row, then wrap; squares touch. NOT homogeneous — homogeneous
@@ -507,92 +515,28 @@ fn build_compact_strip(
         chip.add_controller(click);
         flow.insert(&chip, -1);
     }
-    strip.append(&flow);
-    strip
+    flow
 }
 
-fn build_color_row(
-    color: Rgb,
+/// A compact palette: a title over the swatch flow. Read-mostly — no edit
+/// affordances, that is the Palettes view's job.
+fn build_compact_strip(
+    title: &str,
+    colors: &[Rgb],
     fmt: Format,
     window: &ApplicationWindow,
     shared: &SharedState,
-    history_idx: usize,
-    is_history: bool,
 ) -> GBox {
-    let row = GBox::new(Orientation::Horizontal, 8);
-    row.set_margin_top(4);
-    row.set_margin_bottom(4);
-    row.set_margin_start(6);
-    row.set_margin_end(6);
+    let strip = GBox::new(Orientation::Vertical, 3);
+    strip.set_margin_top(4);
+    strip.set_margin_bottom(4);
 
-    let chip = DrawingArea::new();
-    chip.set_size_request(28, 28);
-    chip.set_draw_func(move |_, cr, w, h| {
-        cr.set_source_rgb(
-            color.r as f64 / 255.0,
-            color.g as f64 / 255.0,
-            color.b as f64 / 255.0,
-        );
-        cr.rectangle(0.0, 0.0, w as f64, h as f64);
-        let _ = cr.fill();
-    });
-    row.append(&chip);
-
-    let label = Label::new(Some(&color.format(fmt)));
-    label.set_xalign(0.0);
-    label.set_hexpand(true);
-    row.append(&label);
-
-    let copy_btn = Button::from_icon_name("edit-copy-symbolic");
-    copy_btn.set_tooltip_text(Some("Copy"));
-    copy_btn.connect_clicked(clone!(
-        #[weak]
-        window,
-        move |_| {
-            copy_to_clipboard(&window, &color.format(fmt));
-        }
-    ));
-    row.append(&copy_btn);
-
-    let use_btn = Button::from_icon_name("object-select-symbolic");
-    use_btn.set_tooltip_text(Some("Set as current color"));
-    use_btn.connect_clicked(clone!(
-        #[strong]
-        shared,
-        move |_| {
-            let s = shared.borrow_mut();
-            let mut s = s;
-            s.current = Some(color);
-            refresh_swatch(&s);
-            refresh_code(&s);
-        }
-    ));
-    row.append(&use_btn);
-
-    if is_history {
-        let del_btn = Button::from_icon_name("user-trash-symbolic");
-        del_btn.set_tooltip_text(Some("Remove from history"));
-        del_btn.connect_clicked(clone!(
-            #[strong]
-            shared,
-            #[weak]
-            window,
-            move |_| {
-                {
-                    let mut s = shared.borrow_mut();
-                    if history_idx < s.data.history.len() {
-                        s.data.history.remove(history_idx);
-                    }
-                    let _ = save_data(&s.data);
-                }
-                let s = shared.borrow();
-                refresh_history_ui(&s, &window, &shared);
-            }
-        ));
-        row.append(&del_btn);
-    }
-
-    row
+    let head = Label::new(Some(&format!("{title}  ·  {}", colors.len())));
+    head.add_css_class("dim-label");
+    head.set_xalign(0.0);
+    strip.append(&head);
+    strip.append(&build_swatch_flow(colors, fmt, window, shared));
+    strip
 }
 
 fn build_palette_row(
@@ -4151,33 +4095,9 @@ fn build_ui(app: &Application) {
     pick_btn.set_height_request(44);
     outer.append(&pick_btn);
 
-    // history section
-    // History and Palettes are Expanders now: with the image view alongside, the
-    // left column has more in it than fits, and the answer is to let the user
-    // put away what they are not using.
-    let hist_header = GBox::new(Orientation::Horizontal, 8);
-    let hist_title = Label::new(Some("History"));
-    hist_title.add_css_class("section-head");
-    hist_title.set_xalign(0.0);
-    hist_title.set_hexpand(true);
-    hist_header.append(&hist_title);
-    let clear_hist = Button::with_label("Clear");
-    hist_header.append(&clear_hist);
-    let history_scroll = gtk::ScrolledWindow::new();
-    history_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    history_scroll.set_min_content_height(120);
-    history_scroll.set_max_content_height(280);
-    history_scroll.set_vexpand(true);
-    let history_list = ListBox::new();
-    history_list.set_selection_mode(gtk::SelectionMode::None);
-    history_list.add_css_class("boxed-list");
-    history_scroll.set_child(Some(&history_list));
-
-    hist_header.set_hexpand(true);
-    let hist_exp = gtk::Expander::new(None);
-    hist_exp.set_label_widget(Some(&hist_header));
-    hist_exp.set_child(Some(&history_scroll));
-    outer.append(&hist_exp);
+    // History has no section of its own: it lives as the compact History palette
+    // in the Palettes section below (with its own Clear there). The Expander and
+    // the 32-deep row list it used to have are gone.
 
     // palettes section (Picker view) — COMPACT now: the History palette + the
     // pinned palettes as scan-at-a-glance strips. The full editable list moved to
@@ -4325,7 +4245,6 @@ fn build_ui(app: &Application) {
         fmt_hex: fmt_hex.clone(),
         fmt_rgb: fmt_rgb.clone(),
         fmt_hsl: fmt_hsl.clone(),
-        history_list: history_list.clone(),
         palettes_list: palettes_list.clone(),
         pinned_box: pinned_box.clone(),
     };
@@ -4356,33 +4275,20 @@ fn build_ui(app: &Application) {
     tips.set_visible(shared.borrow().data.tips);
     outer.prepend(&tips);
 
-    // Section collapse state, restored and persisted. Two identical bindings, so
-    // it is a closure over which field it owns rather than two copies of it.
-    for (exp, get, set) in [
-        (
-            &hist_exp,
-            (|d: &AppData| d.open_history) as fn(&AppData) -> bool,
-            (|d: &mut AppData, v: bool| d.open_history = v) as fn(&mut AppData, bool),
-        ),
-        (
-            &pal_exp,
-            (|d: &AppData| d.open_palettes) as fn(&AppData) -> bool,
-            (|d: &mut AppData, v: bool| d.open_palettes = v) as fn(&mut AppData, bool),
-        ),
-    ] {
-        exp.set_expanded(get(&shared.borrow().data));
-        exp.connect_expanded_notify(clone!(
-            #[strong]
-            shared,
-            move |e| {
-                let mut s = shared.borrow_mut();
-                if get(&s.data) != e.is_expanded() {
-                    set(&mut s.data, e.is_expanded());
-                    let _ = save_data(&s.data);
-                }
+    // Palettes collapse state, restored and persisted. (History no longer has a
+    // section, so its old `open_history` flag is simply unused now.)
+    pal_exp.set_expanded(shared.borrow().data.open_palettes);
+    pal_exp.connect_expanded_notify(clone!(
+        #[strong]
+        shared,
+        move |e| {
+            let mut s = shared.borrow_mut();
+            if s.data.open_palettes != e.is_expanded() {
+                s.data.open_palettes = e.is_expanded();
+                let _ = save_data(&s.data);
             }
-        ));
-    }
+        }
+    ));
 
     tips_btn.set_active(shared.borrow().data.tips);
     tips_btn.connect_toggled(clone!(
@@ -4483,7 +4389,7 @@ fn build_ui(app: &Application) {
             // can't pass window cheaply here; rebuild via stored ref isn't worth it.
             // We just queue a redraw on existing rows by rebuilding.
             // To avoid plumbing window in, fire a synthetic signal: use widget root.
-            if let Some(root) = s.history_list.root() {
+            if let Some(root) = s.pinned_box.root() {
                 if let Some(win) = root.downcast_ref::<ApplicationWindow>() {
                     refresh_history_ui(&s, win, &shared);
                     refresh_palettes_ui(&s, win, &shared);
@@ -4507,20 +4413,8 @@ fn build_ui(app: &Application) {
         });
     }
 
-    // clear history
-    {
-        let shared = shared.clone();
-        let window = window.clone();
-        clear_hist.connect_clicked(move |_| {
-            {
-                let mut s = shared.borrow_mut();
-                s.data.history.clear();
-                let _ = save_data(&s.data);
-            }
-            let s = shared.borrow();
-            refresh_history_ui(&s, &window, &shared);
-        });
-    }
+    // (Clear history now lives on the History palette strip in the Palettes
+    // section — see refresh_pinned_ui.)
 
     // import palette
     {
