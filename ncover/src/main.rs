@@ -1646,6 +1646,9 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     // The path the current image came from — the target for Overwrite. None for a
     // Blank canvas (nothing to overwrite) or before anything is loaded.
     let src_path: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
+    // Pointer position over the canvas (widget coords), or None when it has left.
+    // Drives the crosshair guides + the position/colour readout.
+    let hover: Rc<Cell<Option<(f64, f64)>>> = Rc::new(Cell::new(None));
 
     let box_ = GBox::new(Orientation::Vertical, 8);
 
@@ -1778,6 +1781,8 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         snapped,
         #[strong]
         view,
+        #[strong]
+        hover,
         #[weak]
         src_thumb,
         #[weak]
@@ -1789,6 +1794,11 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
             // draw just marks the next frame — it does not recurse.
             src_thumb.queue_draw();
             res_thumb.queue_draw();
+
+            // Read the ViewMode and pointer NOW: `view` gets shadowed further down
+            // by the fitted() scale factor, so grab what we need up front.
+            let vmode = view.get();
+            let hov = hover.get();
 
             // Checkerboard: what is transparent must LOOK transparent, or a
             // white logo on nothing reads as a white logo on white.
@@ -1811,7 +1821,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
 
             // Source view: the raw file, fit into the widget at its own aspect —
             // no canvas, no grid. A plain look at what you loaded.
-            if view.get() == ViewMode::Source {
+            if vmode == ViewMode::Source {
                 if let Some(pb) = pixbuf.borrow().clone() {
                     let (ox, oy, sc) = fitted(pb.width() as f64, pb.height() as f64, w, h);
                     cr.save().ok();
@@ -1823,6 +1833,14 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
                     }
                     let _ = cr.paint();
                     cr.restore().ok();
+                }
+                // Crosshair over the source view too.
+                if let Some((px, py)) = hov {
+                    let info = pixel_under(
+                        px, py, w, h, vmode, canvas.get(),
+                        &out.borrow(), &pixbuf.borrow(), *place.borrow(),
+                    );
+                    draw_crosshair(cr, w, h, px, py, info);
                 }
                 return;
             }
@@ -1908,17 +1926,59 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
             cr.set_line_width(1.0);
             cr.rectangle(ox + 0.5, oy + 0.5, cv as f64 * view - 1.0, cv as f64 * view - 1.0);
             let _ = cr.stroke();
+
+            // Crosshair on top of everything — guides + coordinate/colour readout.
+            if let Some((px, py)) = hov {
+                let info = pixel_under(
+                    px, py, w, h, vmode, cv,
+                    &out.borrow(), &pixbuf.borrow(), *place.borrow(),
+                );
+                draw_crosshair(cr, w, h, px, py, info);
+            }
         }
     ));
 
+    // A crosshair cursor over the canvas — this is a place for precise work, and
+    // an arrow does not say that.
+    area.set_cursor_from_name(Some("crosshair"));
+
+    // Track the pointer for the crosshair guides + readout.
+    let motion = gtk::EventControllerMotion::new();
+    motion.connect_motion(clone!(
+        #[strong]
+        hover,
+        #[weak]
+        area,
+        move |_, x, y| {
+            hover.set(Some((x, y)));
+            area.queue_draw();
+        }
+    ));
+    motion.connect_leave(clone!(
+        #[strong]
+        hover,
+        #[weak]
+        area,
+        move |_| {
+            hover.set(None);
+            area.queue_draw();
+        }
+    ));
+    area.add_controller(motion);
+
     // Click a pixel -> it becomes the current colour, exactly as a screen pick
-    // does, so it flows into the history and the palettes.
+    // does, so it flows into the history and the palettes. Uses the SAME mapping
+    // as the hover readout, so what the crosshair shows is what a click picks.
     let click = gtk::GestureClick::new();
     click.connect_pressed(clone!(
         #[strong]
         pixbuf,
         #[strong]
         out,
+        #[strong]
+        place,
+        #[strong]
+        canvas,
         #[strong]
         view,
         #[strong]
@@ -1928,32 +1988,12 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         #[weak]
         area,
         move |_, _, px, py| {
-            // Pick from what is on screen. In Source view that is the raw file;
-            // in Result view it is the composite (or the source, if nothing is
-            // applied) — picking the layer underneath what you see would be a lie.
-            let Some(pb) = (match view.get() {
-                ViewMode::Source => pixbuf.borrow().clone(),
-                ViewMode::Result => out.borrow().clone().or_else(|| pixbuf.borrow().clone()),
-            }) else {
-                return;
-            };
             let (w, h) = (area.width() as f64, area.height() as f64);
-            let (ox, oy, scale) = fitted(pb.width() as f64, pb.height() as f64, w, h);
-            let ix = ((px - ox) / scale).floor();
-            let iy = ((py - oy) / scale).floor();
-            if ix < 0.0 || iy < 0.0 || ix >= pb.width() as f64 || iy >= pb.height() as f64 {
-                return; // clicked the checkerboard, not the image
-            }
-            let nch = pb.n_channels() as usize;
-            let i = iy as usize * pb.rowstride() as usize + ix as usize * nch;
-            let bytes = unsafe { pb.pixels() };
-            if i + 3 > bytes.len() {
-                return;
-            }
-            let c = Rgb {
-                r: bytes[i],
-                g: bytes[i + 1],
-                b: bytes[i + 2],
+            let Some((_, _, c)) = pixel_under(
+                px, py, w, h, view.get(), canvas.get(),
+                &out.borrow(), &pixbuf.borrow(), *place.borrow(),
+            ) else {
+                return; // clicked the checkerboard / outside the canvas
             };
             {
                 let mut s = shared.borrow_mut();
@@ -4159,6 +4199,120 @@ fn fitted(pw: f64, ph: f64, ww: f64, wh: f64) -> (f64, f64, f64) {
     let dw = pw * scale;
     let dh = ph * scale;
     ((ww - dw) / 2.0, (wh - dh) / 2.0, scale)
+}
+
+/// What is under a widget point `(px, py)` on the canvas area of size `(aw, ah)`:
+/// the coordinate (canvas px in Result view, image px in Source view) and the
+/// colour there, if a pixel exists. The single mapping used by BOTH the hover
+/// crosshair readout and click-to-pick, so what you hover is what you pick.
+fn pixel_under(
+    px: f64,
+    py: f64,
+    aw: f64,
+    ah: f64,
+    view: ViewMode,
+    canvas: i32,
+    out: &Option<gdk_pixbuf::Pixbuf>,
+    src: &Option<gdk_pixbuf::Pixbuf>,
+    place: Placement,
+) -> Option<(i32, i32, Rgb)> {
+    let rgb_at = |pb: &gdk_pixbuf::Pixbuf, x: i32, y: i32| {
+        let bytes = unsafe { pb.pixels() };
+        let (r, g, b, _) = sample(pb, bytes, x, y);
+        Rgb { r, g, b }
+    };
+    match view {
+        ViewMode::Source => {
+            let pb = src.as_ref()?;
+            let (ox, oy, sc) = fitted(pb.width() as f64, pb.height() as f64, aw, ah);
+            let ix = ((px - ox) / sc).floor() as i32;
+            let iy = ((py - oy) / sc).floor() as i32;
+            if ix < 0 || iy < 0 || ix >= pb.width() || iy >= pb.height() {
+                return None;
+            }
+            Some((ix, iy, rgb_at(pb, ix, iy)))
+        }
+        ViewMode::Result => {
+            // Widget -> canvas: the canvas square is what is fitted in Result view.
+            let (ox, oy, sc) = fitted(canvas as f64, canvas as f64, aw, ah);
+            let cx = ((px - ox) / sc).floor() as i32;
+            let cy = ((py - oy) / sc).floor() as i32;
+            if cx < 0 || cy < 0 || cx >= canvas || cy >= canvas {
+                return None;
+            }
+            if let Some(o) = out {
+                // The applied result is canvas-sized: sample it directly.
+                return Some((cx, cy, rgb_at(o, cx, cy)));
+            }
+            // No result yet: the canvas shows the PLACED source, so invert the
+            // placement to find the source pixel. Off the source = transparent =
+            // no colour, but the coordinate is still valid.
+            let pb = src.as_ref()?;
+            let sx = ((cx as f64 - place.dx) / place.scale).floor() as i32;
+            let sy = ((cy as f64 - place.dy) / place.scale).floor() as i32;
+            if sx < 0 || sy < 0 || sx >= pb.width() || sy >= pb.height() {
+                return None;
+            }
+            Some((cx, cy, rgb_at(pb, sx, sy)))
+        }
+    }
+}
+
+/// The TradingView-style crosshair: dashed guide lines tracking the pointer
+/// across the whole canvas, plus a small readout of the position and the colour
+/// underneath — the precision layer for editing / drawing / selecting.
+fn draw_crosshair(
+    cr: &gtk::cairo::Context,
+    w: f64,
+    h: f64,
+    px: f64,
+    py: f64,
+    info: Option<(i32, i32, Rgb)>,
+) {
+    // Guides — full-width and full-height dashed lines through the pointer.
+    cr.save().ok();
+    cr.set_line_width(1.0);
+    cr.set_dash(&[4.0, 4.0], 0.0);
+    cr.set_source_rgba(0.95, 0.95, 1.0, 0.55);
+    let (gx, gy) = (px.floor() + 0.5, py.floor() + 0.5);
+    cr.move_to(gx, 0.0);
+    cr.line_to(gx, h);
+    cr.move_to(0.0, gy);
+    cr.line_to(w, gy);
+    let _ = cr.stroke();
+    cr.set_dash(&[], 0.0);
+    cr.restore().ok();
+
+    // Readout chip — coordinate + colour, offset off the pointer and clamped so
+    // it never runs off the edge.
+    let Some((x, y, c)) = info else { return };
+    let text = format!("{x},{y}  {}", c.hex());
+    cr.select_font_face(
+        "monospace",
+        gtk::cairo::FontSlant::Normal,
+        gtk::cairo::FontWeight::Normal,
+    );
+    cr.set_font_size(12.0);
+    let tw = cr.text_extents(&text).map(|e| e.width()).unwrap_or(90.0);
+    let (sw, pad) = (14.0, 6.0);
+    let (bw, bh) = (pad + sw + 6.0 + tw + pad, 22.0);
+    let mut bx = px + 14.0;
+    let mut by = py + 14.0;
+    if bx + bw > w {
+        bx = (px - 14.0 - bw).max(2.0);
+    }
+    if by + bh > h {
+        by = (py - 14.0 - bh).max(2.0);
+    }
+    cr.set_source_rgba(0.05, 0.05, 0.06, 0.85);
+    cr.rectangle(bx, by, bw, bh);
+    let _ = cr.fill();
+    cr.set_source_rgb(c.r as f64 / 255.0, c.g as f64 / 255.0, c.b as f64 / 255.0);
+    cr.rectangle(bx + pad, by + (bh - sw) / 2.0, sw, sw);
+    let _ = cr.fill();
+    cr.set_source_rgba(0.95, 0.95, 0.97, 1.0);
+    cr.move_to(bx + pad + sw + 6.0, by + bh - 7.0);
+    let _ = cr.show_text(&text);
 }
 
 /// The transparency checkerboard behind a rail thumbnail.
