@@ -1,61 +1,64 @@
-# xcolor 🌈
+# n.cover
+
+<img align="right" width="160" src="https://raw.githubusercontent.com/xjmzx/ncover/main/extra/n.circle.png">
 
 [![GitHub release](https://img.shields.io/github/v/release/xjmzx/ncover.svg)](https://github.com/xjmzx/ncover/releases)
 [![dependency status](https://deps.rs/repo/github/xjmzx/ncover/status.svg)](https://deps.rs/repo/github/xjmzx/ncover)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-<img align="right" width="250" src="https://raw.githubusercontent.com/xjmzx/ncover/main/extra/screenshot.png">
+**n.cover** is a GTK4 desktop app for picking colours and building **cover /
+label artwork**. It began as a wrapper around the [`xcolor`](#the-bundled-xcolor-cli)
+X11 screen picker and grew into a small artwork tool. Part of the `n.*` suite.
 
-Lightweight color picker for X11. Use mouse to select colors visible anywhere on
-the screen to get their RGB representation.
+**Colour**
 
-> **About this repository.** Originally forked from
-> [`Soft/xcolor`](https://github.com/Soft/xcolor) by Samuel Laurén, which is no
-> longer maintained. This version modernizes the crate (xcb 1.5, clap 4, nix
-> 0.29, edition 2021) and adds **`n.cover`** (binary `ncover`) — a GTK4 desktop
-> app that grew out of the picker into a colour + **cover / label artwork** tool:
-> colour history and named palettes (export to GPL / CSS / JSON), an artwork
-> viewer with SVG introspection, a disc/label templater, and batch processing
-> over a folder or an ndisc-published discography. The CLI below is unchanged and
-> remains the X11 picker; `n.cover` shells out to it for screen picks.
-> MIT-licensed, as upstream.
->
-> Build the app with `make gui` and install it with `make install-gui`
-> (`PREFIX=$HOME/.local` for a user install).
+- Pick any colour on screen (via the bundled `xcolor` CLI) — HEX / RGB / HSL,
+  copied to the clipboard.
+- Recent colours collect into a compact **History palette**.
+- **Palettes:** import `.gpl` / `.json`, export to GPL / CSS / JSON, named
+  swatches, pin up to three to the Picker, plus a dedicated Palettes view.
 
-## Installation
+**Artwork**
 
-### Using Cargo
+- Open **PNG / SVG / JPEG / WebP**, or **Browse** a folder and scroll it with the
+  arrow keys.
+- Click any pixel to pick it; build a palette from an image (quantised) or from
+  an SVG (its *declared* colours, with fonts and text).
+- Place a source on a square canvas (200–1000 px) with drag, zoom, snapping and a
+  grid.
+- **Build:** a blank canvas, Invert, centred squares, and a disc / label mask
+  (alpha / white / colour / gradient corners) — the steps stack.
+- A **Source / Result** rail to compare the raw image against what you built.
+- Save as PNG, or **Overwrite** the original PNG in place.
+- **Batch** the same recipe over a folder, or over an ndisc-published
+  discography — with a Preview contact sheet and a dry run. It never writes over
+  your source.
 
-`xcolor` can be installed using
-[cargo](https://doc.rust-lang.org/stable/cargo/):
+Output is always PNG (the disc mask needs alpha).
+
+## Install
+
+`n.cover` needs GTK 4. It shells out to the `xcolor` CLI, which is built
+alongside it and needs [xcb](https://xcb.freedesktop.org) and
+[Xlib](https://www.x.org/wiki/).
 
 ``` shell
-cargo install xcolor
+make gui                              # build target/release/ncover
+make install-gui PREFIX=$HOME/.local  # user install (~/.local/bin + .desktop)
 ```
 
-Building and running `xcolor` requires [xcb](https://xcb.freedesktop.org) and
-[Xlib](https://www.x.org/wiki/) libraries to be present.
-
-To get the latest development version of `xcolor`, you can direct cargo to
-install from the git repository:
+`make install-all` additionally installs the `xcolor` CLI, its man page and
+icons under `PREFIX` (default `/usr/local`). To build the latest from git:
 
 ``` shell
 cargo install --git 'https://github.com/xjmzx/ncover.git'
 ```
 
-Installing `xcolor` with cargo will not install its manual page or desktop file.
-To also install these additional files, invoke `make install` in the project
-directory. By default, the install script will place the files under
-`/usr/local/` hierarchy.
+## The bundled `xcolor` CLI
 
-### Arch Linux
-
-`xcolor` is available in the Arch Linux [community repository](https://archlinux.org/packages/community/x86_64/xcolor/). To install it with [pacman](https://wiki.archlinux.org/title/Pacman):
-
-``` shell
-pacman -S xcolor
-```
+`n.cover` uses `xcolor` — the X11 screen picker this repository is forked from —
+for its screen picks. It is also a capable standalone tool, and its own
+documentation follows.
 
 ## Usage
 
@@ -166,3 +169,10 @@ and padded with zeroes to be sixteen characters long.
 ## Issues
 
 Bugs & Issues should be reported at [GitHub](https://github.com/xjmzx/ncover/issues).
+
+## Credits & license
+
+`n.cover` and the modernised CLI are maintained by **xjmzx**. The `xcolor` CLI
+was originally written by **Samuel Laurén**
+([`Soft/xcolor`](https://github.com/Soft/xcolor)), with contributions from Callum
+Osmotherly and others. MIT-licensed, as upstream.
