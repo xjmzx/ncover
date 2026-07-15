@@ -1603,6 +1603,18 @@ fn build_batch(
     exp
 }
 
+/// Which of the two the big canvas is showing. The right rail flips between the
+/// raw Source and the built Result so you can compare what you loaded against
+/// what you have made.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ViewMode {
+    Source,
+    Result,
+}
+
+/// Side of a rail thumbnail, px.
+const THUMB: i32 = 140;
+
 fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     // The loaded image, shared between the draw handler, the click handler and
     // the palette button.
@@ -1628,6 +1640,9 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     // Which guides fired on the last move — drawn so you can SEE why the image
     // stopped. A snap you cannot see is just a bug.
     let snapped: Rc<RefCell<(bool, bool)>> = Rc::new(RefCell::new((false, false)));
+    // Which the big canvas is showing. Result by default — with no build applied
+    // the result IS the framed source, so it starts honest.
+    let view: Rc<Cell<ViewMode>> = Rc::new(Cell::new(ViewMode::Result));
 
     let box_ = GBox::new(Orientation::Vertical, 8);
 
@@ -1727,6 +1742,17 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     let browse_idx: Rc<Cell<usize>> = Rc::new(Cell::new(0));
 
     // 400x400 is the floor, not the size — it expands with the window.
+    // The two rail thumbnails, created before the draw func so the canvas can
+    // ask them to redraw whenever it does — which means every state change
+    // reaches them for free, with no plumbing through each handler.
+    let src_thumb = gtk::DrawingArea::new();
+    let res_thumb = gtk::DrawingArea::new();
+    for t in [&src_thumb, &res_thumb] {
+        t.set_content_width(THUMB);
+        t.set_content_height(THUMB);
+        t.add_css_class("frame");
+    }
+
     let area = gtk::DrawingArea::new();
     area.set_content_width(400);
     area.set_content_height(400);
@@ -1747,8 +1773,19 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         grid_on,
         #[strong]
         snapped,
+        #[strong]
+        view,
+        #[weak]
+        src_thumb,
+        #[weak]
+        res_thumb,
         move |_, cr, w, h| {
             let (w, h) = (w as f64, h as f64);
+            // The canvas is the source of truth for what is on screen; whenever it
+            // repaints, nudge the thumbnails to repaint too. Queuing from inside a
+            // draw just marks the next frame — it does not recurse.
+            src_thumb.queue_draw();
+            res_thumb.queue_draw();
 
             // Checkerboard: what is transparent must LOOK transparent, or a
             // white logo on nothing reads as a white logo on white.
@@ -1768,6 +1805,24 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
                 row += 1;
             }
             let _ = cr.fill();
+
+            // Source view: the raw file, fit into the widget at its own aspect —
+            // no canvas, no grid. A plain look at what you loaded.
+            if view.get() == ViewMode::Source {
+                if let Some(pb) = pixbuf.borrow().clone() {
+                    let (ox, oy, sc) = fitted(pb.width() as f64, pb.height() as f64, w, h);
+                    cr.save().ok();
+                    cr.translate(ox, oy);
+                    cr.scale(sc, sc);
+                    cr.set_source_pixbuf(&pb, 0.0, 0.0);
+                    if sc > 1.0 {
+                        cr.source().set_filter(gtk::cairo::Filter::Nearest);
+                    }
+                    let _ = cr.paint();
+                    cr.restore().ok();
+                }
+                return;
+            }
 
             // The CANVAS is what is fitted into the widget — not the image. The
             // image lives on the canvas, and may hang off its edges.
@@ -1862,15 +1917,21 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         #[strong]
         out,
         #[strong]
+        view,
+        #[strong]
         shared,
         #[weak]
         window,
         #[weak]
         area,
         move |_, _, px, py| {
-            // Pick from what is on screen — if a template is applied, that is
-            // the image, and picking the source underneath would be a lie.
-            let Some(pb) = out.borrow().clone().or_else(|| pixbuf.borrow().clone()) else {
+            // Pick from what is on screen. In Source view that is the raw file;
+            // in Result view it is the composite (or the source, if nothing is
+            // applied) — picking the layer underneath what you see would be a lie.
+            let Some(pb) = (match view.get() {
+                ViewMode::Source => pixbuf.borrow().clone(),
+                ViewMode::Result => out.borrow().clone().or_else(|| pixbuf.borrow().clone()),
+            }) else {
                 return;
             };
             let (w, h) = (area.width() as f64, area.height() as f64);
@@ -1939,12 +2000,17 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         out,
         #[strong]
         snapped,
+        #[strong]
+        view,
         #[weak]
         area,
         move |_, ox, oy| {
             if out.borrow().is_some() {
                 return; // a template is applied — reset to move it again
             }
+            // Framing is a Result-view act; if you were eyeing the Source, drag
+            // snaps you back to what you are actually changing.
+            view.set(ViewMode::Result);
             let Some(src) = pixbuf.borrow().clone() else { return };
             // Widget pixels -> canvas pixels. Without dividing by the view scale
             // the image would race ahead of (or lag) the cursor.
@@ -1988,6 +2054,8 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         place,
         #[strong]
         out,
+        #[strong]
+        view,
         #[weak]
         area,
         #[upgrade_or]
@@ -1996,6 +2064,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
             if out.borrow().is_some() {
                 return glib::Propagation::Proceed;
             }
+            view.set(ViewMode::Result);
             let mut p = place.borrow_mut();
             let c = canvas.get() as f64 / 2.0;
             // Keep the canvas centre fixed under the zoom, so the thing you are
@@ -2030,11 +2099,13 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         let out = out.clone();
         let area = area.clone();
         let canvas = canvas.clone();
+        let view = view.clone();
         Rc::new(move |mode: u8| {
             let Some(src) = pixbuf.borrow().clone() else { return };
             if out.borrow().is_some() {
                 return;
             }
+            view.set(ViewMode::Result);
             let (sw, sh) = (src.width(), src.height());
             let cv = canvas.get();
             let c = cv as f64;
@@ -2065,6 +2136,80 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     }
 
     box_.append(&area);
+
+    // --- rail thumbnails: draw + click-to-select ---------------------------
+    // Source thumb: the raw file, fit into the square.
+    src_thumb.set_draw_func(clone!(
+        #[strong]
+        pixbuf,
+        #[strong]
+        view,
+        move |_, cr, w, h| {
+            thumb_checker(cr, w, h);
+            if let Some(pb) = pixbuf.borrow().clone() {
+                let (ox, oy, sc) = fitted(pb.width() as f64, pb.height() as f64, w as f64, h as f64);
+                cr.save().ok();
+                cr.translate(ox, oy);
+                cr.scale(sc, sc);
+                cr.set_source_pixbuf(&pb, 0.0, 0.0);
+                let _ = cr.paint();
+                cr.restore().ok();
+            }
+            thumb_border(cr, w, h, view.get() == ViewMode::Source);
+        }
+    ));
+    // Result thumb: the composite, drawn the same way the canvas draws it —
+    // the applied out, or the framed source — fit into the square.
+    res_thumb.set_draw_func(clone!(
+        #[strong]
+        canvas,
+        #[strong]
+        pixbuf,
+        #[strong]
+        out,
+        #[strong]
+        place,
+        #[strong]
+        view,
+        move |_, cr, w, h| {
+            thumb_checker(cr, w, h);
+            let cv = canvas.get();
+            let (ox, oy, sc) = fitted(cv as f64, cv as f64, w as f64, h as f64);
+            cr.save().ok();
+            cr.translate(ox, oy);
+            cr.scale(sc, sc);
+            cr.rectangle(0.0, 0.0, cv as f64, cv as f64);
+            cr.clip();
+            if let Some(pb) = out.borrow().clone() {
+                cr.set_source_pixbuf(&pb, 0.0, 0.0);
+                let _ = cr.paint();
+            } else if let Some(pb) = pixbuf.borrow().clone() {
+                let p = *place.borrow();
+                cr.translate(p.dx, p.dy);
+                cr.scale(p.scale, p.scale);
+                cr.set_source_pixbuf(&pb, 0.0, 0.0);
+                let _ = cr.paint();
+            }
+            cr.restore().ok();
+            thumb_border(cr, w, h, view.get() == ViewMode::Result);
+        }
+    ));
+
+    // Click either thumb to make the canvas show that view.
+    for (thumb, mode) in [(&src_thumb, ViewMode::Source), (&res_thumb, ViewMode::Result)] {
+        let g = gtk::GestureClick::new();
+        g.connect_pressed(clone!(
+            #[strong]
+            view,
+            #[weak]
+            area,
+            move |_, _, _, _| {
+                view.set(mode);
+                area.queue_draw(); // cascades to both thumbs (border restyle)
+            }
+        ));
+        thumb.add_controller(g);
+    }
 
     // Inspect panel — SVG only, and empty otherwise. An SVG states its colours,
     // fonts and structure; a raster only implies them, so there is nothing
@@ -2216,9 +2361,13 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         let out = out.clone();
         let area = area.clone();
         let b_save = b_save.clone();
+        let view = view.clone();
         Rc::new(move |pb: gdk_pixbuf::Pixbuf| {
             *out.borrow_mut() = Some(pb);
             b_save.set_sensitive(true);
+            // You just built something — show it. Editing while looking at the
+            // raw source would be invisible.
+            view.set(ViewMode::Result);
             area.queue_draw();
         })
     };
@@ -2499,6 +2648,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         let b_save = b_save.clone();
         let area = area.clone();
         let file_lbl = file_lbl.clone();
+        let view = view.clone();
         Rc::new(move |pb: gdk_pixbuf::Pixbuf, nm: String, info: Option<SvgInfo>, tip: Option<String>| {
             let (pw, ph) = (pb.width(), pb.height());
             let is_svg = info.is_some();
@@ -2515,6 +2665,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
             *svg.borrow_mut() = info;
             *out.borrow_mut() = None; // a new image drops any old build/template
             *place.borrow_mut() = Placement::cover(pw, ph, canvas.get());
+            view.set(ViewMode::Result); // a fresh image: Result == the framed source
             ctl.set_visible(true);
             b_grid.set_sensitive(true);
             for b in [&b_fit, &b_cover, &b_centre, &b_11] {
@@ -2788,7 +2939,33 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         }
     ));
 
-    box_
+    box_.set_hexpand(true);
+
+    // The right rail: a thin full-height strip, Source over Result, each a
+    // thumbnail you click to put on the canvas.
+    let rail = GBox::new(Orientation::Vertical, 6);
+    rail.set_width_request(THUMB + 20);
+    let rail_head = Label::new(Some("View"));
+    rail_head.add_css_class("section-head");
+    rail_head.set_xalign(0.0);
+    rail.append(&rail_head);
+    for (label, thumb, tip) in [
+        ("Source", &src_thumb, "The raw image, as loaded"),
+        ("Result", &res_thumb, "What you have built — the composite that would be saved"),
+    ] {
+        let l = Label::new(Some(label));
+        l.add_css_class("dim-label");
+        l.set_xalign(0.0);
+        thumb.set_tooltip_text(Some(tip));
+        rail.append(&l);
+        rail.append(thumb);
+    }
+
+    let split = GBox::new(Orientation::Horizontal, 12);
+    split.append(&box_);
+    split.append(&Separator::new(Orientation::Vertical));
+    split.append(&rail);
+    split
 }
 
 fn export_palette(window: &ApplicationWindow, shared: &SharedState, idx: usize) {
@@ -3905,6 +4082,42 @@ fn fitted(pw: f64, ph: f64, ww: f64, wh: f64) -> (f64, f64, f64) {
     let dw = pw * scale;
     let dh = ph * scale;
     ((ww - dw) / 2.0, (wh - dh) / 2.0, scale)
+}
+
+/// The transparency checkerboard behind a rail thumbnail.
+fn thumb_checker(cr: &gtk::cairo::Context, w: i32, h: i32) {
+    let (w, h) = (w as f64, h as f64);
+    let sq = 10.0;
+    cr.set_source_rgb(0.16, 0.16, 0.17);
+    let _ = cr.paint();
+    cr.set_source_rgb(0.21, 0.21, 0.22);
+    let (mut y, mut row) = (0.0, 0);
+    while y < h {
+        let mut x = if row % 2 == 0 { 0.0 } else { sq };
+        while x < w {
+            cr.rectangle(x, y, sq, sq);
+            x += sq * 2.0;
+        }
+        y += sq;
+        row += 1;
+    }
+    let _ = cr.fill();
+}
+
+/// A thumbnail's border — bright cyan (the app's "active" colour, same as the
+/// snap guides) when this is the selected view, faint otherwise.
+fn thumb_border(cr: &gtk::cairo::Context, w: i32, h: i32, selected: bool) {
+    let (w, h) = (w as f64, h as f64);
+    if selected {
+        cr.set_source_rgba(0.2, 0.85, 1.0, 0.95);
+        cr.set_line_width(2.0);
+        cr.rectangle(1.0, 1.0, w - 2.0, h - 2.0);
+    } else {
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.2);
+        cr.set_line_width(1.0);
+        cr.rectangle(0.5, 0.5, w - 1.0, h - 1.0);
+    }
+    let _ = cr.stroke();
 }
 
 // ---------- image view ----------
