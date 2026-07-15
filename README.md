@@ -1,10 +1,10 @@
 # xcolor 🌈
 
-[![GitHub release](https://img.shields.io/github/v/release/xjmzx/xcolor.svg)](https://github.com/xjmzx/xcolor/releases)
-[![dependency status](https://deps.rs/repo/github/xjmzx/xcolor/status.svg)](https://deps.rs/repo/github/xjmzx/xcolor)
+[![GitHub release](https://img.shields.io/github/v/release/xjmzx/ncover.svg)](https://github.com/xjmzx/ncover/releases)
+[![dependency status](https://deps.rs/repo/github/xjmzx/ncover/status.svg)](https://deps.rs/repo/github/xjmzx/ncover)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-<img align="right" width="250" src="https://raw.githubusercontent.com/xjmzx/xcolor/main/extra/screenshot.png">
+<img align="right" width="250" src="https://raw.githubusercontent.com/xjmzx/ncover/main/extra/screenshot.png">
 
 Lightweight color picker for X11. Use mouse to select colors visible anywhere on
 the screen to get their RGB representation.
@@ -41,7 +41,7 @@ To get the latest development version of `xcolor`, you can direct cargo to
 install from the git repository:
 
 ``` shell
-cargo install --git 'https://github.com/xjmzx/xcolor.git'
+cargo install --git 'https://github.com/xjmzx/ncover.git'
 ```
 
 Installing `xcolor` with cargo will not install its manual page or desktop file.
@@ -165,4 +165,4 @@ and padded with zeroes to be sixteen characters long.
 
 ## Issues
 
-Bugs & Issues should be reported at [GitHub](https://github.com/xjmzx/xcolor/issues).
+Bugs & Issues should be reported at [GitHub](https://github.com/xjmzx/ncover/issues).
