@@ -1,13 +1,13 @@
 [Desktop Entry]
-Name=XColor Picker
+Name=n.cover
 GenericName=Colour & artwork tool
 Comment=Pick colours, manage palettes, and template cover / label artwork
 Keywords=color;colour;picker;palette;design;hex;rgb;hsl;cover;label;artwork;disc;
-TryExec=xcolor-gui
-Exec=xcolor-gui
+TryExec=ncover
+Exec=ncover
 Terminal=false
 Type=Application
 Categories=Graphics;Utility;
 Icon=xcolor
 StartupNotify=true
-StartupWMClass=io.github.xjmzx.XColorGui
+StartupWMClass=io.github.xjmzx.NCover

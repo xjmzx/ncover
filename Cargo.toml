@@ -40,4 +40,4 @@ lto = true
 panic = "abort"
 
 [workspace]
-members = ["xcolor-gui"]
+members = ["ncover"]

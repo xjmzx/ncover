@@ -18,7 +18,7 @@ use gtk::{
 use gtk4 as gtk;
 use serde::{Deserialize, Serialize};
 
-const APP_ID: &str = "io.github.xjmzx.XColorGui";
+const APP_ID: &str = "io.github.xjmzx.NCover";
 const HISTORY_LIMIT: usize = 32;
 
 /// How many of the most-recent history colours become the compact "History
@@ -194,7 +194,7 @@ fn yes() -> bool {
 fn data_path() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("xcolor-gui/data.json")
+        .join("ncover/data.json")
 }
 
 fn load_data() -> AppData {
@@ -281,7 +281,7 @@ where
 
 fn show_error(parent: &ApplicationWindow, msg: &str) {
     let dlg = gtk::AlertDialog::builder()
-        .message("xcolor-gui")
+        .message("n.cover")
         .detail(msg)
         .modal(true)
         .build();
@@ -3200,7 +3200,7 @@ fn install_css() {
 fn samples_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("xcolor-gui/samples")
+        .join("ncover/samples")
 }
 
 /// Simple vector shapes with NAMED, declared fills — the file to open to see
@@ -4349,7 +4349,7 @@ fn write_json(path: &Path, pal: &Palette) -> Result<()> {
 fn build_ui(app: &Application) {
     let window = ApplicationWindow::builder()
         .application(app)
-        .title("XColor")
+        .title("n.cover")
         // Wide enough for controls + a usable image area side by side.
         .default_width(1000)
         .default_height(720)
@@ -4598,7 +4598,7 @@ fn build_ui(app: &Application) {
                     let _ = save_data(&s.data);
                 }
                 // A read-only data dir must not stop the app opening.
-                Err(e) => eprintln!("xcolor-gui: could not write samples: {e}"),
+                Err(e) => eprintln!("n.cover: could not write samples: {e}"),
             }
         }
     }

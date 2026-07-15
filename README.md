@@ -12,10 +12,16 @@ the screen to get their RGB representation.
 > **About this repository.** Originally forked from
 > [`Soft/xcolor`](https://github.com/Soft/xcolor) by Samuel Laurén, which is no
 > longer maintained. This version modernizes the crate (xcb 1.5, clap 4, nix
-> 0.29, edition 2021) and adds **`xcolor-gui`** — a GTK4 desktop wrapper that
-> keeps a colour history and named palettes, and exports to GPL / CSS / JSON.
-> The CLI below is unchanged in spirit and remains the picker; the GUI shells out
-> to it. MIT-licensed, as upstream.
+> 0.29, edition 2021) and adds **`n.cover`** (binary `ncover`) — a GTK4 desktop
+> app that grew out of the picker into a colour + **cover / label artwork** tool:
+> colour history and named palettes (export to GPL / CSS / JSON), an artwork
+> viewer with SVG introspection, a disc/label templater, and batch processing
+> over a folder or an ndisc-published discography. The CLI below is unchanged and
+> remains the X11 picker; `n.cover` shells out to it for screen picks.
+> MIT-licensed, as upstream.
+>
+> Build the app with `make gui` and install it with `make install-gui`
+> (`PREFIX=$HOME/.local` for a user install).
 
 ## Installation
 

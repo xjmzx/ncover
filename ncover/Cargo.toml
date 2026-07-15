@@ -1,7 +1,7 @@
 [package]
-name = "xcolor-gui"
+name = "ncover"
 version = "0.1.0"
-description = "GTK4 GUI wrapper for the xcolor color picker"
+description = "n.cover — colour picker and cover / label artwork tool (GTK4)"
 authors = ["xjmzx"]
 license = "MIT"
 readme = "../README.md"
@@ -9,7 +9,7 @@ edition = "2021"
 rust-version = "1.80"
 
 [[bin]]
-name = "xcolor-gui"
+name = "ncover"
 path = "src/main.rs"
 
 [dependencies]

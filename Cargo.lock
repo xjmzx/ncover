@@ -653,6 +653,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c835948974f68e0bd58636fc6c5b1fbff7b297e3046f11b3b3c18bbac012c6d"
 
 [[package]]
+name = "ncover"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "dirs",
+ "gio",
+ "glib",
+ "gtk4",
+ "roxmltree",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1194,21 +1209,6 @@ dependencies = [
  "nom",
  "x11",
  "xcb",
-]
-
-[[package]]
-name = "xcolor-gui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-channel",
- "dirs",
- "gio",
- "glib",
- "gtk4",
- "roxmltree",
- "serde",
- "serde_json",
 ]
 
 [[package]]
