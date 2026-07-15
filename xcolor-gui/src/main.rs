@@ -486,7 +486,11 @@ fn build_swatch_flow(
     flow.set_column_spacing(0);
     flow.set_row_spacing(0);
     flow.set_homogeneous(false);
-    flow.set_halign(gtk::Align::Start);
+    // Fill, NOT Start: a Start-aligned FlowBox shrink-wraps to its minimum width
+    // (one column), which stacks every swatch vertically. Fill gives it the
+    // column's width so it lays out left-to-right and wraps at ten. Non-
+    // homogeneous keeps the squares square; the leftover width sits to the right.
+    flow.set_halign(gtk::Align::Fill);
     flow.add_css_class("swatch-flow");
     for color in colors {
         let c = *color;
@@ -668,7 +672,9 @@ fn build_palette_row(
     chips.set_column_spacing(0);
     chips.set_row_spacing(0);
     chips.set_homogeneous(false);
-    chips.set_halign(gtk::Align::Start);
+    // Fill so it wraps at ten across the width; Start would collapse it to a
+    // single vertical column. See build_swatch_flow.
+    chips.set_halign(gtk::Align::Fill);
     chips.add_css_class("swatch-flow");
     for (cidx, swatch) in pal.colors.iter().enumerate() {
         let color = &swatch.rgb;
