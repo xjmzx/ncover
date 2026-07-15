@@ -1,8 +1,8 @@
 [Desktop Entry]
 Name=XColor Picker
-GenericName=Color Picker
-Comment=Pick colors from the screen, manage history and palettes
-Keywords=color;picker;palette;design;hex;rgb;hsl;
+GenericName=Colour & artwork tool
+Comment=Pick colours, manage palettes, and template cover / label artwork
+Keywords=color;colour;picker;palette;design;hex;rgb;hsl;cover;label;artwork;disc;
 TryExec=xcolor-gui
 Exec=xcolor-gui
 Terminal=false

@@ -1643,6 +1643,9 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     // Which the big canvas is showing. Result by default — with no build applied
     // the result IS the framed source, so it starts honest.
     let view: Rc<Cell<ViewMode>> = Rc::new(Cell::new(ViewMode::Result));
+    // The path the current image came from — the target for Overwrite. None for a
+    // Blank canvas (nothing to overwrite) or before anything is loaded.
+    let src_path: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
 
     let box_ = GBox::new(Orientation::Vertical, 8);
 
@@ -2245,8 +2248,13 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     b_reset.set_tooltip_text(Some("Back to the original image"));
     let b_save = Button::with_label("Save PNG…");
     b_save.set_sensitive(false);
+    // Overwrite writes the result back over the ORIGINAL file — only offered when
+    // that file is a PNG (the format we save), so it is never a lossy surprise.
+    let b_overwrite = Button::with_label("Overwrite");
+    b_overwrite.add_css_class("destructive-action");
+    b_overwrite.set_sensitive(false);
 
-    for b in [&b_alpha, &b_white, &b_solid, &b_grad, &b_reset, &b_save] {
+    for b in [&b_alpha, &b_white, &b_solid, &b_grad, &b_reset, &b_save, &b_overwrite] {
         b.set_sensitive(false);
         tpl.append(b);
     }
@@ -2361,10 +2369,14 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         let out = out.clone();
         let area = area.clone();
         let b_save = b_save.clone();
+        let b_overwrite = b_overwrite.clone();
+        let src_path = src_path.clone();
         let view = view.clone();
         Rc::new(move |pb: gdk_pixbuf::Pixbuf| {
             *out.borrow_mut() = Some(pb);
             b_save.set_sensitive(true);
+            // Overwrite only when there is a result AND the original is a PNG.
+            b_overwrite.set_sensitive(src_is_png(&src_path.borrow()));
             // You just built something — show it. Editing while looking at the
             // raw source would be invisible.
             view.set(ViewMode::Result);
@@ -2462,9 +2474,12 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         area,
         #[weak]
         b_save,
+        #[weak]
+        b_overwrite,
         move |_| {
             *out.borrow_mut() = None;
             b_save.set_sensitive(false);
+            b_overwrite.set_sensitive(false);
             area.queue_draw();
         }
     ));
@@ -2499,6 +2514,53 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
                         // has none.
                         if let Err(e) = pb.savev(&path, "png", &[]) {
                             show_error(&window, &format!("Save failed: {e}"));
+                        }
+                    }
+                ),
+            );
+        }
+    ));
+    // Overwrite the ORIGINAL file. Irreversible, and often a file in the music
+    // library, so it asks first — the one place this tool writes over something
+    // it did not create.
+    b_overwrite.connect_clicked(clone!(
+        #[weak]
+        window,
+        #[strong]
+        out,
+        #[strong]
+        src_path,
+        move |_| {
+            let Some(pb) = out.borrow().clone() else { return };
+            let Some(path) = src_path.borrow().clone() else { return };
+            if !src_is_png(&Some(path.clone())) {
+                return;
+            }
+            let name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("this file")
+                .to_string();
+            let dlg = gtk::AlertDialog::builder()
+                .modal(true)
+                .message(format!("Overwrite {name}?"))
+                .detail("This replaces the original PNG with the result. It cannot be undone.")
+                .buttons(["Cancel", "Overwrite"])
+                .cancel_button(0)
+                .default_button(0)
+                .build();
+            dlg.choose(
+                Some(&window),
+                gio::Cancellable::NONE,
+                clone!(
+                    #[weak]
+                    window,
+                    move |res| {
+                        if res.ok() != Some(1) {
+                            return; // Cancel, Esc, or error
+                        }
+                        if let Err(e) = pb.savev(&path, "png", &[]) {
+                            show_error(&window, &format!("Overwrite failed: {e}"));
                         }
                     }
                 ),
@@ -2646,6 +2708,8 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         let b_square = b_square.clone();
         let sq_scale = sq_scale.clone();
         let b_save = b_save.clone();
+        let b_overwrite = b_overwrite.clone();
+        let src_path = src_path.clone();
         let area = area.clone();
         let file_lbl = file_lbl.clone();
         let view = view.clone();
@@ -2664,6 +2728,8 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
             *pixbuf.borrow_mut() = Some(pb);
             *svg.borrow_mut() = info;
             *out.borrow_mut() = None; // a new image drops any old build/template
+            // The path is the Overwrite target; a Blank canvas (tip None) has none.
+            *src_path.borrow_mut() = tip.as_deref().map(PathBuf::from);
             *place.borrow_mut() = Placement::cover(pw, ph, canvas.get());
             view.set(ViewMode::Result); // a fresh image: Result == the framed source
             ctl.set_visible(true);
@@ -2681,6 +2747,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
             b_square.set_sensitive(true);
             sq_scale.set_sensitive(true);
             b_save.set_sensitive(false);
+            b_overwrite.set_sensitive(false); // no result yet, nothing to write
             area.queue_draw();
             rebuild_inspect();
         })
@@ -3767,6 +3834,16 @@ impl Scope {
             guard_root: m.library_root.clone(),
         }
     }
+}
+
+/// Is the current source a PNG? Only then may Overwrite write the result back
+/// over it — we save PNG, so overwriting anything else would silently change the
+/// format (and, for a JPEG, quietly re-encode as PNG under the same name).
+fn src_is_png(path: &Option<PathBuf>) -> bool {
+    path.as_ref()
+        .and_then(|p| p.extension())
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("png"))
 }
 
 /// Load one image path into the pieces the view needs: the pixbuf, a display

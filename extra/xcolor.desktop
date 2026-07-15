@@ -15,3 +15,6 @@ Terminal=false
 Type=Application
 Categories=Graphics;Utility;
 Icon=xcolor
+# The CLI is a helper the GUI shells out to for screen picks, not a separate app
+# to launch from a dock. Keep it installed, keep it out of menus and the dock.
+NoDisplay=true
