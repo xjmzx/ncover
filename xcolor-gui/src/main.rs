@@ -632,6 +632,7 @@ fn build_tips(window: &ApplicationWindow, toggle: &ToggleButton) -> GBox {
         "samples/disc-label.svg — Inspect also reads the FONTS and the text. For label art that is most of what you need.",
         "samples/swatches.png — a raster only implies its colours, so “Palette from image” quantises them.",
         "samples/artwork.png — bigger than the canvas and not square, so it must be PLACED: drag to move, scroll to zoom, it snaps to the centre and edges.",
+        "Blank + Build — start from a white canvas, Invert to a black one, and stamp centred black squares (scalable) to build label artwork from nothing. The ops stack.",
         "Disc — mask what you framed. Corners can be alpha, white, a colour, or a gradient — taken from the colours you have picked.",
         "Size — 200 to 1000. Changing it keeps your framing: the square grows, the picture stays where you put it.",
         "Batch — the same recipe over a whole folder (a whole discography of cover.png), or over ndisc's PUBLISHED releases straight from the suite. Dry run first; it never writes into your source folder.",
@@ -1246,8 +1247,14 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     header.append(&file_lbl);
 
     let open_btn = Button::with_label("Open");
-    open_btn.set_tooltip_text(Some("Open an image (PNG / SVG / JPEG)"));
+    open_btn.set_tooltip_text(Some("Open an image (PNG / SVG / JPEG / WebP)"));
     header.append(&open_btn);
+
+    let blank_btn = Button::with_label("Blank");
+    blank_btn.set_tooltip_text(Some(
+        "Start from a blank white canvas — build a label from nothing but squares (Invert for a black ground)",
+    ));
+    header.append(&blank_btn);
 
     let pal_btn = Button::with_label("Palette from image");
     pal_btn.set_tooltip_text(Some(
@@ -1675,6 +1682,46 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     tpl.set_visible(false);
     box_.append(&tpl);
 
+    // ---- Build row: invert + composited squares (label-artwork primitives) --
+    // These COMPOSE with each other and with the disc, each acting on whatever is
+    // already on the canvas — so you can stack: square, square, invert, disc.
+    let bld = GBox::new(Orientation::Horizontal, 6);
+    let bld_lbl = Label::new(Some("Build"));
+    bld_lbl.add_css_class("dim-label");
+    bld.append(&bld_lbl);
+
+    let b_invert = Button::with_label("Invert");
+    b_invert.set_tooltip_text(Some(
+        "Invert the colours (RGB). Transparency is left alone — a colour tool inverts the colour, not the shape.",
+    ));
+    bld.append(&b_invert);
+
+    let sq_lbl = Label::new(Some("Square"));
+    sq_lbl.add_css_class("dim-label");
+    bld.append(&sq_lbl);
+    // 5–100% of the canvas side. A slider because sizing a square is something
+    // you judge by eye, not by typing a number.
+    let sq_scale = gtk::Scale::with_range(Orientation::Horizontal, 5.0, 100.0, 1.0);
+    sq_scale.set_value(40.0);
+    sq_scale.set_hexpand(true);
+    sq_scale.set_draw_value(true);
+    sq_scale.set_value_pos(gtk::PositionType::Right);
+    sq_scale.set_tooltip_text(Some("Square side, as a percent of the canvas"));
+    bld.append(&sq_scale);
+
+    let b_square = Button::with_label("+ Square");
+    b_square.set_tooltip_text(Some(
+        "Stamp a centred black square at this size. Stamp several, at different sizes, to build a design.",
+    ));
+    bld.append(&b_square);
+
+    for b in [&b_invert, &b_square] {
+        b.set_sensitive(false);
+    }
+    sq_scale.set_sensitive(false);
+    bld.set_visible(false);
+    box_.append(&bld);
+
     box_.append(&build_batch(window, shared, canvas.clone(), &size_dd));
 
     // Changing the output size RESCALES the framing rather than resetting it —
@@ -1720,17 +1767,43 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         }
     ));
 
-    let apply = {
+    // The current working image: the built-up result if there is one, otherwise
+    // the source freshly composed onto the canvas. Every build op reads THIS and
+    // writes `out`, which is what lets them stack — invert an image that already
+    // has a square, disc-mask something you inverted, and so on.
+    let work: Rc<dyn Fn() -> Option<gdk_pixbuf::Pixbuf>> = {
         let pixbuf = pixbuf.clone();
         let place = place.clone();
         let out = out.clone();
         let canvas = canvas.clone();
-        let shared = shared.clone();
+        Rc::new(move || {
+            if let Some(o) = out.borrow().clone() {
+                return Some(o);
+            }
+            let src = pixbuf.borrow().clone()?;
+            compose(&src, *place.borrow(), canvas.get()).ok()
+        })
+    };
+
+    // Commit a built pixbuf as the new working image and show it.
+    let commit: Rc<dyn Fn(gdk_pixbuf::Pixbuf)> = {
+        let out = out.clone();
         let area = area.clone();
-        let window = window.clone();
         let b_save = b_save.clone();
+        Rc::new(move |pb: gdk_pixbuf::Pixbuf| {
+            *out.borrow_mut() = Some(pb);
+            b_save.set_sensitive(true);
+            area.queue_draw();
+        })
+    };
+
+    let apply = {
+        let work = work.clone();
+        let commit = commit.clone();
+        let shared = shared.clone();
+        let window = window.clone();
         Rc::new(move |fill_kind: u8| {
-            let Some(src) = pixbuf.borrow().clone() else { return };
+            let Some(framed) = work() else { return };
             let (cur, prev) = {
                 let s = shared.borrow();
                 (
@@ -1759,25 +1832,49 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
                     }
                 },
             };
-            // Compose onto the fixed canvas FIRST — the disc masks what you have
-            // framed, not the original file.
-            let framed = match compose(&src, *place.borrow(), canvas.get()) {
-                Ok(c) => c,
-                Err(e) => {
-                    show_error(&window, &format!("Canvas failed: {e}"));
-                    return;
-                }
-            };
+            // The disc masks whatever is on the canvas now — the framed source,
+            // or a design you have already built up.
             match disc_template(&framed, fill) {
-                Ok(pb) => {
-                    *out.borrow_mut() = Some(pb);
-                    b_save.set_sensitive(true);
-                    area.queue_draw();
-                }
+                Ok(pb) => commit(pb),
                 Err(e) => show_error(&window, &format!("Template failed: {e}")),
             }
         })
     };
+
+    b_invert.connect_clicked(clone!(
+        #[strong]
+        work,
+        #[strong]
+        commit,
+        #[weak]
+        window,
+        move |_| {
+            let Some(w) = work() else { return };
+            match invert_rgb(&w) {
+                Ok(pb) => commit(pb),
+                Err(e) => show_error(&window, &format!("Invert failed: {e}")),
+            }
+        }
+    ));
+
+    b_square.connect_clicked(clone!(
+        #[strong]
+        work,
+        #[strong]
+        commit,
+        #[weak]
+        sq_scale,
+        #[weak]
+        window,
+        move |_| {
+            let Some(w) = work() else { return };
+            let frac = sq_scale.value() / 100.0;
+            match stamp_square(&w, frac, Rgb { r: 0, g: 0, b: 0 }) {
+                Ok(pb) => commit(pb),
+                Err(e) => show_error(&window, &format!("Square failed: {e}")),
+            }
+        }
+    ));
 
     for (b, kind) in [(&b_alpha, 0u8), (&b_white, 1), (&b_solid, 2), (&b_grad, 3)] {
         let apply = apply.clone();
@@ -1811,8 +1908,8 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
                 .map(|(a, _)| a.to_string())
                 .unwrap_or_else(|| name.borrow().clone());
             let dlg = gtk::FileDialog::builder()
-                .title("Save disc")
-                .initial_name(format!("{stem}-disc.png"))
+                .title("Save image")
+                .initial_name(format!("{stem}-out.png"))
                 .build();
             dlg.save(
                 Some(&window),
@@ -1983,6 +2080,14 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         b_reset,
         #[weak]
         b_save,
+        #[weak]
+        bld,
+        #[weak]
+        b_invert,
+        #[weak]
+        b_square,
+        #[weak]
+        sq_scale,
         #[strong]
         rebuild_inspect,
         #[weak]
@@ -1993,7 +2098,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         pal_btn,
         move |_| {
             let filter = gtk::FileFilter::new();
-            filter.set_name(Some("Images (PNG / SVG / JPEG)"));
+            filter.set_name(Some("Images (PNG / SVG / JPEG / WebP)"));
             for p in ["*.png", "*.svg", "*.jpg", "*.jpeg", "*.webp"] {
                 filter.add_pattern(p);
             }
@@ -2047,6 +2152,14 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
                     b_reset,
                     #[weak]
                     b_save,
+                    #[weak]
+                    bld,
+                    #[weak]
+                    b_invert,
+                    #[weak]
+                    b_square,
+                    #[weak]
+                    sq_scale,
                     #[strong]
                     rebuild_inspect,
                     #[weak]
@@ -2119,6 +2232,10 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
                                 for b in [&b_alpha, &b_white, &b_solid, &b_grad, &b_reset] {
                                     b.set_sensitive(true);
                                 }
+                                bld.set_visible(true);
+                                b_invert.set_sensitive(true);
+                                b_square.set_sensitive(true);
+                                sq_scale.set_sensitive(true);
                                 b_save.set_sensitive(false);
                                 area.queue_draw();
                                 rebuild_inspect();
@@ -2128,6 +2245,102 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
                     }
                 ),
             );
+        }
+    ));
+
+    // Blank loads a white canvas by the SAME path a file does — it just
+    // synthesises the pixbuf instead of reading one — so everything downstream
+    // (framing, build ops, disc, save) works with no special case. The source is
+    // a generous flat white; scaling flat white costs nothing and never degrades.
+    blank_btn.connect_clicked(clone!(
+        #[weak]
+        window,
+        #[strong]
+        canvas,
+        #[strong]
+        pixbuf,
+        #[strong]
+        name,
+        #[strong]
+        place,
+        #[strong]
+        svg,
+        #[strong]
+        out,
+        #[weak]
+        ctl,
+        #[weak]
+        b_grid,
+        #[weak]
+        b_fit,
+        #[weak]
+        b_cover,
+        #[weak]
+        b_centre,
+        #[weak]
+        b_11,
+        #[weak]
+        pal_btn,
+        #[weak]
+        tpl,
+        #[weak]
+        b_alpha,
+        #[weak]
+        b_white,
+        #[weak]
+        b_solid,
+        #[weak]
+        b_grad,
+        #[weak]
+        b_reset,
+        #[weak]
+        b_save,
+        #[weak]
+        bld,
+        #[weak]
+        b_invert,
+        #[weak]
+        b_square,
+        #[weak]
+        sq_scale,
+        #[strong]
+        rebuild_inspect,
+        #[weak]
+        area,
+        #[weak]
+        file_lbl,
+        move |_| {
+            let pb = match blank_canvas(1000) {
+                Ok(pb) => pb,
+                Err(e) => {
+                    show_error(&window, &format!("Could not create a blank canvas: {e}"));
+                    return;
+                }
+            };
+            *name.borrow_mut() = "blank.png".to_string();
+            *place.borrow_mut() = Placement::cover(pb.width(), pb.height(), canvas.get());
+            *pixbuf.borrow_mut() = Some(pb);
+            *svg.borrow_mut() = None;
+            *out.borrow_mut() = None;
+            file_lbl.set_text("blank");
+            pal_btn.set_tooltip_text(Some("The image's dominant colours, quantised from its pixels"));
+            ctl.set_visible(true);
+            b_grid.set_sensitive(true);
+            for b in [&b_fit, &b_cover, &b_centre, &b_11] {
+                b.set_sensitive(true);
+            }
+            pal_btn.set_sensitive(true);
+            tpl.set_visible(true);
+            for b in [&b_alpha, &b_white, &b_solid, &b_grad, &b_reset] {
+                b.set_sensitive(true);
+            }
+            bld.set_visible(true);
+            b_invert.set_sensitive(true);
+            b_square.set_sensitive(true);
+            sq_scale.set_sensitive(true);
+            b_save.set_sensitive(false);
+            area.queue_draw();
+            rebuild_inspect();
         }
     ));
 
@@ -2584,6 +2797,77 @@ fn compose(src: &gdk_pixbuf::Pixbuf, p: Placement, canvas: i32) -> Result<gdk_pi
         }
     }
     Ok(dst)
+}
+
+// ---------- build primitives ----------
+//
+// Two operations for BUILDING an image rather than framing one: invert, and a
+// centred solid square. Together with a blank canvas they are a minimal kit for
+// label artwork — a black square on white, or (invert) a white one on black —
+// and they COMPOSE, each one working on what is already on the canvas.
+
+/// A blank opaque-white square, the ground you build a label on. White because a
+/// record label is white far more often than not, and Invert reaches black in
+/// one click from here.
+fn blank_canvas(size: i32) -> Result<gdk_pixbuf::Pixbuf> {
+    let pb = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, true, 8, size, size)
+        .context("could not allocate the canvas")?;
+    pb.fill(0xFFFF_FFFF); // 0xRRGGBBAA — white, fully opaque
+    Ok(pb)
+}
+
+/// Invert RGB on a COPY, leaving alpha alone. A colour tool inverts the COLOUR,
+/// not the shape: a transparent pixel stays transparent, it does not become an
+/// opaque black one.
+fn invert_rgb(src: &gdk_pixbuf::Pixbuf) -> Result<gdk_pixbuf::Pixbuf> {
+    let pb = src.copy().context("could not copy the image")?;
+    let (w, h) = (pb.width(), pb.height());
+    let n = pb.n_channels() as usize;
+    let stride = pb.rowstride() as usize;
+    let bytes = unsafe { pb.pixels() };
+    for y in 0..h {
+        for x in 0..w {
+            let i = y as usize * stride + x as usize * n;
+            bytes[i] = 255 - bytes[i];
+            bytes[i + 1] = 255 - bytes[i + 1];
+            bytes[i + 2] = 255 - bytes[i + 2];
+            // channel 3 (alpha), if present, is deliberately untouched
+        }
+    }
+    Ok(pb)
+}
+
+/// Composite a filled, centred square onto a COPY of `base`. Side = `frac` of the
+/// canvas side (the canvas is square), clamped to [0,1]. Opaque — a label mark is
+/// solid, not a tint — so it also stamps over transparent ground, turning it into
+/// the square's colour there.
+fn stamp_square(base: &gdk_pixbuf::Pixbuf, frac: f64, c: Rgb) -> Result<gdk_pixbuf::Pixbuf> {
+    let pb = base.copy().context("could not copy the canvas")?;
+    let (w, h) = (pb.width(), pb.height());
+    let side = (frac.clamp(0.0, 1.0) * w.min(h) as f64).round() as i32;
+    if side <= 0 {
+        return Ok(pb); // an empty square is a no-op, not an error
+    }
+    let (x0, y0) = ((w - side) / 2, (h - side) / 2);
+    let n = pb.n_channels() as usize;
+    let stride = pb.rowstride() as usize;
+    let has_a = pb.has_alpha();
+    let bytes = unsafe { pb.pixels() };
+    for y in y0..(y0 + side).min(h) {
+        for x in x0..(x0 + side).min(w) {
+            if x < 0 || y < 0 {
+                continue;
+            }
+            let i = y as usize * stride + x as usize * n;
+            bytes[i] = c.r;
+            bytes[i + 1] = c.g;
+            bytes[i + 2] = c.b;
+            if has_a {
+                bytes[i + 3] = 255;
+            }
+        }
+    }
+    Ok(pb)
 }
 
 // ---------- disc template ----------
@@ -4233,6 +4517,71 @@ mod batch_tests {
         // Alpha corners: the disc is inscribed, so (0,0) is outside it.
         let b = unsafe { got.pixels() };
         assert_eq!(b[3], 0, "the corner must be transparent");
+    }
+
+    fn px(pb: &gdk_pixbuf::Pixbuf, x: i32, y: i32) -> (u8, u8, u8, u8) {
+        let n = pb.n_channels() as usize;
+        let b = unsafe { pb.pixels() };
+        let i = y as usize * pb.rowstride() as usize + x as usize * n;
+        (b[i], b[i + 1], b[i + 2], if pb.has_alpha() { b[i + 3] } else { 255 })
+    }
+
+    #[test]
+    fn a_blank_canvas_is_opaque_white() {
+        let pb = blank_canvas(64).unwrap();
+        assert_eq!((pb.width(), pb.height()), (64, 64));
+        assert_eq!(px(&pb, 0, 0), (255, 255, 255, 255));
+        assert_eq!(px(&pb, 63, 63), (255, 255, 255, 255));
+    }
+
+    #[test]
+    fn invert_flips_rgb_and_leaves_alpha_alone() {
+        let src = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, true, 8, 4, 4).unwrap();
+        // A semi-transparent teal: 10,200,150 @ alpha 80.
+        {
+            let n = src.n_channels() as usize;
+            let b = unsafe { src.pixels() };
+            for i in (0..b.len()).step_by(n) {
+                b[i] = 10;
+                b[i + 1] = 200;
+                b[i + 2] = 150;
+                b[i + 3] = 80;
+            }
+        }
+        let inv = invert_rgb(&src).unwrap();
+        assert_eq!(
+            px(&inv, 1, 1),
+            (245, 55, 105, 80),
+            "RGB inverted (255-x); alpha untouched — a colour tool inverts colour, not shape"
+        );
+        // Twice is identity.
+        let back = invert_rgb(&inv).unwrap();
+        assert_eq!(px(&back, 2, 2), (10, 200, 150, 80));
+    }
+
+    #[test]
+    fn a_square_is_centred_black_and_opaque() {
+        // 100px canvas, 40% square = 40px, centred → spans [30,70).
+        let base = blank_canvas(100).unwrap();
+        let out = stamp_square(&base, 0.40, Rgb { r: 0, g: 0, b: 0 }).unwrap();
+        assert_eq!(px(&out, 50, 50), (0, 0, 0, 255), "centre is inside the square");
+        assert_eq!(px(&out, 31, 31), (0, 0, 0, 255), "just inside the top-left corner");
+        assert_eq!(px(&out, 28, 28), (255, 255, 255, 255), "just outside stays white");
+        assert_eq!(px(&out, 0, 0), (255, 255, 255, 255), "the ground is untouched");
+    }
+
+    #[test]
+    fn squares_stack_and_a_zero_square_is_a_no_op() {
+        // Build: a big square, then a smaller one on top — both black here, but
+        // the point is the second reads the first's result, not the ground.
+        let base = blank_canvas(100).unwrap();
+        let big = stamp_square(&base, 0.80, Rgb { r: 0, g: 0, b: 0 }).unwrap();
+        let small = stamp_square(&big, 0.20, Rgb { r: 255, g: 0, b: 0 }).unwrap();
+        assert_eq!(px(&small, 50, 50), (255, 0, 0, 255), "the small square is on top");
+        assert_eq!(px(&small, 15, 15), (0, 0, 0, 255), "the big one still shows around it");
+        // A zero-size square changes nothing.
+        let noop = stamp_square(&base, 0.0, Rgb { r: 0, g: 0, b: 0 }).unwrap();
+        assert_eq!(px(&noop, 50, 50), (255, 255, 255, 255));
     }
 
     #[test]
