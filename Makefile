@@ -29,6 +29,14 @@ install: target/release/xcolor
 	install -D -m644 -- extra/icons/xcolor-48.png "$(DESTDIR)$(PREFIX)/share/icons/hicolor/48x48/apps/xcolor.png"
 	install -D -m644 -- extra/icons/xcolor-256.png "$(DESTDIR)$(PREFIX)/share/icons/hicolor/256x256/apps/xcolor.png"
 	install -D -m644 -- extra/icons/xcolor-512.png "$(DESTDIR)$(PREFIX)/share/icons/hicolor/512x512/apps/xcolor.png"
+	@# Refresh desktop + icon caches on a real user install only — skip when
+	@# staging into DESTDIR (packaging), where package triggers own the caches.
+	@if [ -z "$(DESTDIR)" ] && command -v update-desktop-database >/dev/null 2>&1; then \
+		update-desktop-database "$(PREFIX)/share/applications" >/dev/null 2>&1 || true; \
+	fi
+	@if [ -z "$(DESTDIR)" ] && command -v gtk-update-icon-cache >/dev/null 2>&1; then \
+		gtk-update-icon-cache -f -t "$(PREFIX)/share/icons/hicolor" >/dev/null 2>&1 || true; \
+	fi
 
 install-gui: target/release/ncover
 	install -s -D -m755 -- target/release/ncover "$(DESTDIR)$(PREFIX)/bin/ncover"
@@ -39,6 +47,12 @@ install-gui: target/release/ncover
 	install -D -m644 -- extra/icons/ncover-48.png "$(DESTDIR)$(PREFIX)/share/icons/hicolor/48x48/apps/ncover.png"
 	install -D -m644 -- extra/icons/ncover-256.png "$(DESTDIR)$(PREFIX)/share/icons/hicolor/256x256/apps/ncover.png"
 	install -D -m644 -- extra/icons/ncover-512.png "$(DESTDIR)$(PREFIX)/share/icons/hicolor/512x512/apps/ncover.png"
+	@if [ -z "$(DESTDIR)" ] && command -v update-desktop-database >/dev/null 2>&1; then \
+		update-desktop-database "$(PREFIX)/share/applications" >/dev/null 2>&1 || true; \
+	fi
+	@if [ -z "$(DESTDIR)" ] && command -v gtk-update-icon-cache >/dev/null 2>&1; then \
+		gtk-update-icon-cache -f -t "$(PREFIX)/share/icons/hicolor" >/dev/null 2>&1 || true; \
+	fi
 
 install-all: install install-gui
 
