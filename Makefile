@@ -23,16 +23,19 @@ target/release/ncover: FORCE
 FORCE:
 
 # Regenerate the hicolor PNG raster sets (run once per icon change). Suite icon
-# convention: cover-sq -> icon.svg (ncover), color-sq -> icon-xcolor.{svg,png}
-# (xcolor). Two different sources on purpose:
-#   ncover — icon.svg is a plain path SVG, rasterised by rsvg-convert
-#            (librsvg2-bin) or ImageMagick's `convert`.
-#   xcolor — icon-xcolor.svg is a Figma *angular/conic-gradient* colour wheel
+# convention (2026-09-11): the rounded Figma exports. cover-x2 -> icon.svg
+# (ncover), color-x2 -> icon-xcolor.png (xcolor). Two different sources on purpose:
+#   ncover — icon.svg is a path SVG with outlined lettering. rsvg-convert
+#            (librsvg2-bin) renders it faithfully. ImageMagick's `convert`
+#            fallback does not render its Figma masks reliably; without
+#            rsvg-convert, downscale the 2048px cover-x2.png export instead.
+#   xcolor — the colour wheel is a Figma *angular/conic-gradient*
 #            (foreignObject + CSS conic-gradient); NEITHER librsvg nor
 #            ImageMagick can render it — and for the same reason GTK can't use
 #            it as a scalable icon at runtime. Its rasters are downscaled from
-#            the Figma-rendered master PNG (icon-xcolor.png) instead. Keep the
-#            .svg as the design source of record; the .png is the raster master.
+#            the Figma-rendered master PNG (icon-xcolor.png) instead. The
+#            color-x2 export ships no SVG, so icon-xcolor.svg is the older
+#            square design, kept only as a record; the .png is the master.
 icons:
 	@for s in $(ICON_SIZES); do \
 	  out="extra/icons/ncover-$$s.png"; \
