@@ -1,14 +1,14 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
-<mask id="mask0_3323_75" style="mask-type:alpha" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
-<rect width="1024" height="1024" fill="url(#paint0_linear_3323_75)"/>
+<mask id="mask0_3511_187" style="mask-type:alpha" maskUnits="userSpaceOnUse" x="100" y="100" width="824" height="824">
+<rect x="100.5" y="100.5" width="823" height="823" rx="184.5" fill="url(#paint0_linear_3511_187)" stroke="#0F001B"/>
 </mask>
-<g mask="url(#mask0_3323_75)">
-<rect width="1024" height="1024" rx="80" fill="#00E1FF"/>
+<g mask="url(#mask0_3511_187)">
+<rect x="100" y="100" width="824" height="824" rx="185" fill="#FF0000"/>
 </g>
 <defs>
-<linearGradient id="paint0_linear_3323_75" x1="512" y1="0" x2="512" y2="1024" gradientUnits="userSpaceOnUse">
-<stop offset="0.182692" stop-color="#1E1E2E"/>
-<stop offset="0.9375" stop-color="#0B0B10"/>
+<linearGradient id="paint0_linear_3511_187" x1="512" y1="100" x2="512" y2="924" gradientUnits="userSpaceOnUse">
+<stop offset="0.0961538" stop-color="#AA43FF"/>
+<stop offset="0.899038" stop-color="#181825"/>
 </linearGradient>
 </defs>
 </svg>
