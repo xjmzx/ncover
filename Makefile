@@ -29,13 +29,16 @@ FORCE:
 #            (librsvg2-bin) renders it faithfully. ImageMagick's `convert`
 #            fallback does not render its Figma masks reliably; without
 #            rsvg-convert, downscale the 2048px cover-x2.png export instead.
-#   xcolor — the colour wheel is a Figma *angular/conic-gradient*
-#            (foreignObject + CSS conic-gradient); NEITHER librsvg nor
-#            ImageMagick can render it — and for the same reason GTK can't use
-#            it as a scalable icon at runtime. Its rasters are downscaled from
-#            the Figma-rendered master PNG (icon-xcolor.png) instead. The
-#            color-x2 export ships no SVG, so icon-xcolor.svg is the older
-#            square design, kept only as a record; the .png is the master.
+#   xcolor — now the same story as ncover, and the reason it once wasn't is
+#            worth keeping: the old colour-wheel design was a Figma
+#            *angular/conic-gradient* (foreignObject + CSS conic-gradient),
+#            which neither librsvg nor ImageMagick renders — so its rasters had
+#            to be downscaled from the Figma-rendered master PNG, and GTK could
+#            not have used the SVG as a scalable icon either. The 2026-09-12
+#            re-export replaced the wheel with a flat fill, which is ordinary
+#            SVG shapes, so icon-xcolor.svg is a real source again and rsvg
+#            renders it. icon-xcolor.png is kept as the Figma master and the
+#            `convert` fallback below still downscales from it.
 icons:
 	@for s in $(ICON_SIZES); do \
 	  out="extra/icons/ncover-$$s.png"; \
@@ -48,11 +51,17 @@ icons:
 	  fi; \
 	done; \
 	echo "regenerated extra/icons/ncover-*.png from icon.svg"
-	@command -v convert >/dev/null 2>&1 || { echo "need imagemagick to downscale xcolor"; exit 1; }
 	@for s in $(ICON_SIZES); do \
-	  convert icon-xcolor.png -resize $${s}x$${s} "extra/icons/xcolor-$$s.png"; \
+	  out="extra/icons/xcolor-$$s.png"; \
+	  if command -v rsvg-convert >/dev/null 2>&1; then \
+	    rsvg-convert -w $$s -h $$s icon-xcolor.svg -o "$$out"; \
+	  elif command -v convert >/dev/null 2>&1; then \
+	    convert icon-xcolor.png -resize $${s}x$${s} "$$out"; \
+	  else \
+	    echo "need rsvg-convert (librsvg2-bin) or imagemagick"; exit 1; \
+	  fi; \
 	done; \
-	echo "regenerated extra/icons/xcolor-*.png from icon-xcolor.png (Figma render)"
+	echo "regenerated extra/icons/xcolor-*.png from icon-xcolor.svg"
 
 install: target/release/xcolor
 	install -s -D -m755 -- target/release/xcolor "$(DESTDIR)$(PREFIX)/bin/xcolor"
