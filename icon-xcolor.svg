@@ -4,6 +4,70 @@
 </mask>
 <g mask="url(#mask0_3511_187)">
 <rect x="100" y="100" width="824" height="824" rx="185" fill="#FF0000"/>
+<rect x="100" y="100" width="103" height="103" fill="#2F0056"/>
+<rect x="203" y="100" width="103" height="103" fill="#F1C8FF"/>
+<rect x="306" y="100" width="103" height="103" fill="#2F0056"/>
+<rect x="409" y="100" width="103" height="103" fill="#F1C8FF"/>
+<rect x="512" y="100" width="103" height="103" fill="#2F0056"/>
+<rect x="615" y="100" width="103" height="103" fill="#F1C8FF"/>
+<rect x="718" y="100" width="103" height="103" fill="#2F0056"/>
+<rect x="821" y="100" width="103" height="103" fill="#F1C8FF"/>
+<rect x="203" y="203" width="103" height="103" fill="#2F0056"/>
+<rect x="306" y="203" width="103" height="103" fill="#F1C8FF"/>
+<rect x="409" y="203" width="103" height="103" fill="#2F0056"/>
+<rect x="512" y="203" width="103" height="103" fill="#F1C8FF"/>
+<rect x="615" y="203" width="103" height="103" fill="#2F0056"/>
+<rect x="718" y="203" width="103" height="103" fill="#F1C8FF"/>
+<rect x="821" y="203" width="103" height="103" fill="#2F0056"/>
+<rect x="100" y="203" width="103" height="103" fill="#F1C8FF"/>
+<rect x="100" y="306" width="103" height="103" fill="#2F0056"/>
+<rect x="203" y="306" width="103" height="103" fill="#F1C8FF"/>
+<rect x="306" y="306" width="103" height="103" fill="#2F0056"/>
+<rect x="409" y="306" width="103" height="103" fill="#F1C8FF"/>
+<rect x="512" y="306" width="103" height="103" fill="#2F0056"/>
+<rect x="615" y="306" width="103" height="103" fill="#F1C8FF"/>
+<rect x="718" y="306" width="103" height="103" fill="#2F0056"/>
+<rect x="821" y="306" width="103" height="103" fill="#F1C8FF"/>
+<rect x="203" y="409" width="103" height="103" fill="#2F0056"/>
+<rect x="306" y="409" width="103" height="103" fill="#F1C8FF"/>
+<rect x="409" y="409" width="103" height="103" fill="#2F0056"/>
+<rect x="512" y="409" width="103" height="103" fill="#F1C8FF"/>
+<rect x="615" y="409" width="103" height="103" fill="#2F0056"/>
+<rect x="718" y="409" width="103" height="103" fill="#F1C8FF"/>
+<rect x="821" y="409" width="103" height="103" fill="#2F0056"/>
+<rect x="100" y="409" width="103" height="103" fill="#F1C8FF"/>
+<rect x="100" y="512" width="103" height="103" fill="#2F0056"/>
+<rect x="203" y="512" width="103" height="103" fill="#F1C8FF"/>
+<rect x="306" y="512" width="103" height="103" fill="#2F0056"/>
+<rect x="409" y="512" width="103" height="103" fill="#F1C8FF"/>
+<rect x="512" y="512" width="103" height="103" fill="#2F0056"/>
+<rect x="615" y="512" width="103" height="103" fill="#F1C8FF"/>
+<rect x="718" y="512" width="103" height="103" fill="#2F0056"/>
+<rect x="821" y="512" width="103" height="103" fill="#F1C8FF"/>
+<rect x="203" y="615" width="103" height="103" fill="#2F0056"/>
+<rect x="306" y="615" width="103" height="103" fill="#F1C8FF"/>
+<rect x="409" y="615" width="103" height="103" fill="#2F0056"/>
+<rect x="512" y="615" width="103" height="103" fill="#F1C8FF"/>
+<rect x="615" y="615" width="103" height="103" fill="#2F0056"/>
+<rect x="718" y="615" width="103" height="103" fill="#F1C8FF"/>
+<rect x="821" y="615" width="103" height="103" fill="#2F0056"/>
+<rect x="100" y="615" width="103" height="103" fill="#F1C8FF"/>
+<rect x="100" y="718" width="103" height="103" fill="#2F0056"/>
+<rect x="203" y="718" width="103" height="103" fill="#F1C8FF"/>
+<rect x="306" y="718" width="103" height="103" fill="#2F0056"/>
+<rect x="409" y="718" width="103" height="103" fill="#F1C8FF"/>
+<rect x="512" y="718" width="103" height="103" fill="#2F0056"/>
+<rect x="615" y="718" width="103" height="103" fill="#F1C8FF"/>
+<rect x="718" y="718" width="103" height="103" fill="#2F0056"/>
+<rect x="821" y="718" width="103" height="103" fill="#F1C8FF"/>
+<rect x="203" y="821" width="103" height="103" fill="#2F0056"/>
+<rect x="306" y="821" width="103" height="103" fill="#F1C8FF"/>
+<rect x="409" y="821" width="103" height="103" fill="#2F0056"/>
+<rect x="512" y="821" width="103" height="103" fill="#F1C8FF"/>
+<rect x="615" y="821" width="103" height="103" fill="#2F0056"/>
+<rect x="718" y="821" width="103" height="103" fill="#F1C8FF"/>
+<rect x="821" y="821" width="103" height="103" fill="#2F0056"/>
+<rect x="100" y="821" width="103" height="103" fill="#F1C8FF"/>
 </g>
 <defs>
 <linearGradient id="paint0_linear_3511_187" x1="512" y1="100" x2="512" y2="924" gradientUnits="userSpaceOnUse">
