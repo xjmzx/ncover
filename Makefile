@@ -7,6 +7,13 @@ CARGO_FLAGS =
 # hicolor raster sizes generated from the source SVGs.
 ICON_SIZES = 16 24 32 48 256 512
 
+# Linux icons crop the grid margin. The masters carry the art in an 824 square
+# on a 1024 canvas (Apple's grid, ICONS.md), which fills 80.5% of the tile --
+# visibly smaller in the dock than Yaru's own icons, which fill 89%. Cropping to
+# this viewBox gets the same 89% out of the master with no re-export. The .icns
+# and the .ico keep the full canvas.
+LINUX_VIEWBOX ?= 49 49 926 926
+
 all: target/release/xcolor
 
 gui: target/release/ncover
@@ -40,12 +47,17 @@ FORCE:
 #            renders it. icon-xcolor.png is kept as the Figma master and the
 #            `convert` fallback below still downscales from it.
 icons:
+	@# ncover is Linux-only, so every raster is cropped to LINUX_VIEWBOX (89%
+	@# fill, like Yaru's icons) rather than left on Apple's 80.5% grid. The
+	@# source SVGs keep the grid — they are the masters.
+	sed '1s|viewBox="[^"]*"|viewBox="$(LINUX_VIEWBOX)"|' icon.svg > icon-linux.svg
+	sed '1s|viewBox="[^"]*"|viewBox="$(LINUX_VIEWBOX)"|' icon-xcolor.svg > icon-xcolor-linux.svg
 	@for s in $(ICON_SIZES); do \
 	  out="extra/icons/ncover-$$s.png"; \
 	  if command -v rsvg-convert >/dev/null 2>&1; then \
-	    rsvg-convert -w $$s -h $$s icon.svg -o "$$out"; \
+	    rsvg-convert -w $$s -h $$s icon-linux.svg -o "$$out"; \
 	  elif command -v convert >/dev/null 2>&1; then \
-	    convert -background none -resize $${s}x$${s} icon.svg "$$out"; \
+	    convert -background none -resize $${s}x$${s} icon-linux.svg "$$out"; \
 	  else \
 	    echo "need rsvg-convert (librsvg2-bin) or imagemagick"; exit 1; \
 	  fi; \
@@ -54,7 +66,7 @@ icons:
 	@for s in $(ICON_SIZES); do \
 	  out="extra/icons/xcolor-$$s.png"; \
 	  if command -v rsvg-convert >/dev/null 2>&1; then \
-	    rsvg-convert -w $$s -h $$s icon-xcolor.svg -o "$$out"; \
+	    rsvg-convert -w $$s -h $$s icon-xcolor-linux.svg -o "$$out"; \
 	  elif command -v convert >/dev/null 2>&1; then \
 	    convert icon-xcolor.png -resize $${s}x$${s} "$$out"; \
 	  else \
@@ -62,6 +74,7 @@ icons:
 	  fi; \
 	done; \
 	echo "regenerated extra/icons/xcolor-*.png from icon-xcolor.svg"
+	@rm -f icon-linux.svg icon-xcolor-linux.svg
 
 install: target/release/xcolor
 	install -s -D -m755 -- target/release/xcolor "$(DESTDIR)$(PREFIX)/bin/xcolor"
@@ -94,7 +107,10 @@ install-gui: target/release/ncover
 	install -D -m644 -- extra/icons/ncover-48.png "$(DESTDIR)$(PREFIX)/share/icons/hicolor/48x48/apps/ncover.png"
 	install -D -m644 -- extra/icons/ncover-256.png "$(DESTDIR)$(PREFIX)/share/icons/hicolor/256x256/apps/ncover.png"
 	install -D -m644 -- extra/icons/ncover-512.png "$(DESTDIR)$(PREFIX)/share/icons/hicolor/512x512/apps/ncover.png"
-	install -D -m644 -- icon.svg "$(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/ncover.svg"
+	@# Linux fill: crop the grid margin on the way in (see LINUX_VIEWBOX).
+	install -d "$(dir $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/ncover.svg)"
+	sed '1s|viewBox="[^"]*"|viewBox="$(LINUX_VIEWBOX)"|' icon.svg > "$(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/ncover.svg"
+	chmod 0644 "$(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/ncover.svg"
 	@if [ -z "$(DESTDIR)" ] && command -v update-desktop-database >/dev/null 2>&1; then \
 		update-desktop-database "$(PREFIX)/share/applications" >/dev/null 2>&1 || true; \
 	fi
