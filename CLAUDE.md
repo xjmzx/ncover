@@ -4,6 +4,23 @@ GTK4 desktop app for picking colours and building cover / label artwork. Rust ·
 GTK4. The bundled `xcolor` CLI is X11-only; the app itself is not. See
 [`README.md`](README.md) for the feature tour.
 
+## There is a macOS sibling, and it is a different app
+
+[`macos-node/ncover`](https://github.com/macos-node/ncover) is a native SwiftUI
+app with the same name and the same purpose. It is **not a port of this one and
+shares no code**, by decision: the two are expected to develop differently, and
+a shared core is exactly the coupling that would prevent that.
+
+What that means here: **do not grow a macOS story in this repo.** No `.app`
+bundle target, no Cocoa branch, no `cfg(target_os = "macos")` UI path. Work for
+the Mac belongs over there.
+
+That this app *does* build and run on macOS (see the traps below) is still
+useful, because it makes this repo the **oracle**. The Swift side ports tests
+from here keeping their original names and expected pixel values, so wherever
+both still claim to do the same thing, both must agree — and when the macOS app
+diverges on purpose, it deletes the test rather than weakening it.
+
 ## Read SUITE.md first
 
 [`../ndisc/SUITE.md`](https://github.com/xjmzx/ndisc/blob/main/SUITE.md) is
