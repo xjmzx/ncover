@@ -84,6 +84,20 @@ bundle target, so a macOS build is run from `target/release/ncover`.
   CLI-side changes may have an upstream counterpart worth checking rather than
   reinventing.
 
+## Releasing
+
+`make version V=x.y.z`, update `CHANGELOG.md`, commit, tag `vx.y.z`, push the
+tag. The workflow builds on **ubuntu-24.04** — 22.04 ships GTK 4.6 and the GUI
+asks for gtk4's `v4_10` feature, so it fails there at compile time.
+
+The `.deb` is staged with the Makefile's own `install-all DESTDIR=… PREFIX=/usr`
+rather than a reimplementation, which is also why those targets skip the desktop
+and icon cache updates when `DESTDIR` is set.
+
+**`make version` bumps n.cover, not the root crate.** The root is `xcolor`
+0.6.x, and its version means "which upstream xcolor this descends from" —
+bumping it because the GUI changed would misstate the lineage.
+
 ## Not here
 
 Machine-local paths, server addresses, credentials and per-box ops belong in a

@@ -1,0 +1,111 @@
+name: Release
+
+# Fires on any pushed tag starting with `v`, and can be kicked off manually.
+# Publishes a GitHub Release with a .deb and a plain tarball for Linux x86_64.
+#
+# One job, unlike the Tauri apps in the suite: this is a single-platform app,
+# so there is no cross-platform release-ownership dance to get right.
+#
+# The tag is n.cover's version. The `xcolor` CLI this repo is forked from ships
+# alongside it and keeps its own, upstream-derived version — see `make version`.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-x86_64:
+    name: Build Linux x86_64
+    # 24.04, not 22.04: the GUI asks for gtk4's `v4_10` feature and 22.04 ships
+    # GTK 4.6. On 22.04 this fails at compile time, which is at least loud.
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Build the ref being released, not whatever the workflow ran from.
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev \
+            libx11-dev libxcb1-dev libxcursor-dev \
+            librsvg2-bin
+
+      - name: Build the CLI and the app
+        run: make all gui
+
+      - name: Test
+        run: cargo test --release -p ncover
+
+      - name: Stage an install tree
+        # Reuses the Makefile's own install targets rather than reimplementing
+        # them. DESTDIR staging is already supported, and the targets skip the
+        # desktop and icon cache updates when it is set, which is exactly the
+        # packaging behaviour we want.
+        run: make install-all DESTDIR="$PWD/pkg" PREFIX=/usr
+
+      - name: Build the .deb
+        id: deb
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          ver="${tag#v}"
+          mkdir -p pkg/DEBIAN
+          # Depends are hand-written rather than derived with dpkg-shlibdeps,
+          # which would need a full debian/ tree. These are the runtime libs the
+          # two binaries link: GTK4 for the app, Xlib/xcb/Xcursor for the picker.
+          cat > pkg/DEBIAN/control <<EOF
+          Package: ncover
+          Version: ${ver}
+          Section: graphics
+          Priority: optional
+          Architecture: amd64
+          Depends: libgtk-4-1 (>= 4.10), libx11-6, libxcb1, libxcursor1
+          Maintainer: xjmzx <noreply@users.noreply.github.com>
+          Homepage: https://github.com/xjmzx/ncover
+          Description: Colour picker and cover / label artwork tool
+           n.cover is a GTK4 desktop app for picking colours and building cover
+           and label artwork. It ships alongside xcolor, the X11 screen picker
+           this repository is forked from, which it uses for screen picks.
+          EOF
+          deb="ncover_${ver}_amd64.deb"
+          dpkg-deb --root-owner-group --build pkg "$deb"
+          dpkg-deb --info "$deb"
+          tar="ncover-${tag}-linux-x86_64.tar.gz"
+          tar -czf "$tar" -C pkg --exclude DEBIAN .
+          echo "deb=$deb" >> "$GITHUB_OUTPUT"
+          echo "tar=$tar" >> "$GITHUB_OUTPUT"
+
+      - name: Publish
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          draft: false
+          generate_release_notes: true
+          body: |
+            Linux x86_64. Install the `.deb`:
+
+            ```bash
+            sudo apt install ./ncover_*_amd64.deb
+            ```
+
+            Or unpack the tarball over `/usr`. Both install **two** binaries:
+            `ncover` (the GTK4 app) and `xcolor` (the X11 picker it shells out
+            to for screen picks).
+
+            X11 only — there is no Wayland path for the screen picker. The app
+            itself, and its in-app eyedropper, work anywhere GTK4 does.
+          files: |
+            ${{ steps.deb.outputs.deb }}
+            ${{ steps.deb.outputs.tar }}

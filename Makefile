@@ -2,7 +2,7 @@ DESTDIR =
 PREFIX = /usr/local
 CARGO_FLAGS =
 
-.PHONY: all gui icons install install-gui install-all uninstall help FORCE
+.PHONY: all gui icons version install install-gui install-all uninstall help FORCE
 
 # hicolor raster sizes generated from the source SVGs.
 ICON_SIZES = 16 24 32 48 256 512
@@ -76,6 +76,27 @@ icons:
 	echo "regenerated extra/icons/xcolor-*.png from icon-xcolor.svg"
 	@rm -f icon-linux.svg icon-xcolor-linux.svg
 
+## Bump n.cover's version. Two places, and it prints them.
+##
+## The ROOT crate is deliberately left alone. It is `xcolor` 0.6.x, a fork of
+## upstream, and its version means "which xcolor this descends from" — bumping
+## it because the GUI changed would misstate the lineage. Releases are tagged
+## on n.cover's version; the xcolor binary rides along.
+##
+## awk rather than sed -i, which is spelled differently on GNU and BSD and this
+## file should work on both.
+version:
+	@test -n "$(V)" || { echo "usage: make version V=x.y.z"; exit 1; }
+	@awk -v v="$(V)" '/^version = /&&!d{print "version = \"" v "\""; d=1; next} {print}' \
+	  ncover/Cargo.toml > ncover/Cargo.toml.tmp && mv ncover/Cargo.toml.tmp ncover/Cargo.toml
+	@awk -v v="$(V)" '/^name = "ncover"$$/{f=1} f&&/^version = /{print "version = \"" v "\""; f=0; next} {print}' \
+	  Cargo.lock > Cargo.lock.tmp && mv Cargo.lock.tmp Cargo.lock
+	@echo "set $(V) in:"
+	@echo "  ncover/Cargo.toml"
+	@echo "  Cargo.lock (ncover entry)"
+	@echo "root Cargo.toml left at $$(awk '/^version = /{print $$3; exit}' Cargo.toml) — that is xcolor's, not n.cover's"
+	@echo "now: update CHANGELOG.md, commit, then 'git tag v$(V) && git push --tags'"
+
 install: target/release/xcolor
 	install -s -D -m755 -- target/release/xcolor "$(DESTDIR)$(PREFIX)/bin/xcolor"
 	install -D -m644 -- man/xcolor.1 "$(DESTDIR)$(PREFIX)/share/man/man1/xcolor.1"
@@ -145,6 +166,7 @@ help:
 	@echo "  all           - Build xcolor CLI (default)"
 	@echo "  gui           - Build n.cover (ncover)"
 	@echo "  icons         - Regenerate hicolor PNGs from icon.svg / icon-xcolor.svg"
+	@echo "  version       - Bump n.cover's version: make version V=x.y.z"
 	@echo "  install       - Install xcolor CLI + man + .desktop + icons"
 	@echo "  install-gui   - Install n.cover binary + .desktop"
 	@echo "  install-all   - install + install-gui"

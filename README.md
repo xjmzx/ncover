@@ -38,6 +38,17 @@ Output is always PNG (the disc mask needs alpha).
 
 ## Install
 
+From [Releases](https://github.com/xjmzx/ncover/releases), on Linux x86_64:
+
+``` shell
+sudo apt install ./ncover_*_amd64.deb
+```
+
+That installs **two** binaries: `ncover` (the app) and `xcolor` (the X11 picker
+it shells out to for screen picks). Or build from source, below.
+
+## Build
+
 `n.cover` needs GTK 4. It shells out to the `xcolor` CLI, which is built
 alongside it and needs [xcb](https://xcb.freedesktop.org) and
 [Xlib](https://www.x.org/wiki/).
@@ -53,6 +64,9 @@ icons under `PREFIX` (default `/usr/local`). To build the latest from git:
 ``` shell
 cargo install --git 'https://github.com/xjmzx/ncover.git'
 ```
+
+Releases are cut by pushing a tag: `make version V=x.y.z`, update
+`CHANGELOG.md`, commit, then `git tag v0.2.0 && git push --tags`.
 
 ## The bundled `xcolor` CLI
 
