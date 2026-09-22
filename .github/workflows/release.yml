@@ -40,8 +40,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libgtk-4-dev \
-            libx11-dev libxcb1-dev libxcursor-dev \
+            libx11-dev libx11-xcb-dev libxcb1-dev libxcursor-dev \
             librsvg2-bin
+          # libx11-xcb-dev is the one that is easy to miss: the xcb crate's
+          # `xlib_xcb` feature links -lX11-xcb, which lives in its own package
+          # rather than in libx11-dev.
 
       - name: Build the CLI and the app
         run: make all gui
@@ -71,7 +74,7 @@ jobs:
           Section: graphics
           Priority: optional
           Architecture: amd64
-          Depends: libgtk-4-1 (>= 4.10), libx11-6, libxcb1, libxcursor1
+          Depends: libgtk-4-1 (>= 4.10), libx11-6, libx11-xcb1, libxcb1, libxcursor1
           Maintainer: xjmzx <noreply@users.noreply.github.com>
           Homepage: https://github.com/xjmzx/ncover
           Description: Colour picker and cover / label artwork tool

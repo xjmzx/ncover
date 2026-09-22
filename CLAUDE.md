@@ -90,6 +90,12 @@ bundle target, so a macOS build is run from `target/release/ncover`.
 tag. The workflow builds on **ubuntu-24.04** — 22.04 ships GTK 4.6 and the GUI
 asks for gtk4's `v4_10` feature, so it fails there at compile time.
 
+**The build needs `libx11-xcb-dev`**, which is easy to miss because it is not
+part of `libx11-dev`. The `xcb` crate's `xlib_xcb` feature links `-lX11-xcb`,
+and without it the CLI fails at link time with `unable to find library
+-lX11-xcb` after compiling cleanly. Its runtime counterpart `libx11-xcb1`
+belongs in the package's `Depends`.
+
 The `.deb` is staged with the Makefile's own `install-all DESTDIR=… PREFIX=/usr`
 rather than a reimplementation, which is also why those targets skip the desktop
 and icon cache updates when `DESTDIR` is set.
