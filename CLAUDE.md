@@ -1,7 +1,8 @@
 # ncover — notes for Claude
 
 GTK4 desktop app for picking colours and building cover / label artwork. Rust ·
-GTK4 · X11. See [`README.md`](README.md) for the feature tour.
+GTK4. The bundled `xcolor` CLI is X11-only; the app itself is not. See
+[`README.md`](README.md) for the feature tour.
 
 ## Read SUITE.md first
 
@@ -28,6 +29,11 @@ make install-all                      # also installs the xcolor CLI, man page, 
 `make install-all` defaults to `PREFIX=/usr/local` and therefore wants root.
 Pass `PREFIX=$HOME/.local` for a user install, as the rest of the suite does.
 
+`make gui` and `cargo test -p ncover` are the cross-platform pair. The
+`install-*` targets are not: they ship hicolor PNGs, a scalable SVG and a
+`.desktop` file, none of which mean anything off Linux. There is no `.app`
+bundle target, so a macOS build is run from `target/release/ncover`.
+
 ## Traps specific to this repo
 
 - **The root crate is `xcolor`, not `ncover`.** This repo is a fork of the
@@ -35,10 +41,19 @@ Pass `PREFIX=$HOME/.local` for a user install, as the rest of the suite does.
   `cargo build --release` at the root builds the **CLI**, not the app; the app
   is `make gui`. The `[workspace] members = ["ncover"]` line in the root
   `Cargo.toml` is the thing to read before running any cargo command here.
-- **X11 only, and therefore Linux only.** The picker shells out to the bundled
-  `xcolor`, which links `xlib` and `xcb`. There is no Wayland path and no macOS
-  build — this is the one suite app that **cannot** be built or verified on the
-  Mac, so anything platform-sensitive has to be settled on the Linux box.
+- **X11 is the CLI, not the app — do not generalise one to the other.** The
+  root `xcolor` crate links `xlib` and `xcb`, so *it* is X11 and therefore
+  Linux only, with no Wayland path. The GTK4 app is neither: `make gui` is
+  `cargo build -p ncover`, which never compiles the X11 crates at all. The app
+  builds, tests (45 passing) and runs on macOS **unmodified** against Homebrew
+  `gtk4`, `gdk-pixbuf` and `librsvg` — verified 2026-09-22. This file used to
+  claim the opposite; it was reasoning from the root crate.
+- **What macOS does lack is the screen pick.** `pick_color()` shells out to the
+  `xcolor` binary, so pick-from-anywhere is Linux only and any change near it
+  has to be settled on the Linux box. The *in-app* eyedropper — click a pixel
+  on a loaded image, feeding history and palettes identically — is plain
+  gdk-pixbuf and works everywhere, so colour-from-artwork is fully functional
+  off Linux.
 - **Two writing modes with different safety.** *Batch* never writes over its
   source, but *Overwrite* replaces the original PNG in place. They are one click
   apart in the UI. Treat any change near the write path as touching user data,
