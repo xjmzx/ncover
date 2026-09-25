@@ -160,6 +160,11 @@ uninstall:
 	rm -f -- "$(DESTDIR)$(PREFIX)/share/icons/hicolor/256x256/apps/xcolor.png"
 	rm -f -- "$(DESTDIR)$(PREFIX)/share/icons/hicolor/512x512/apps/xcolor.png"
 	rm -f -- "$(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/ncover.svg"
+	@# install rebuilt the cache with the ncover/xcolor icons in it; left alone,
+	@# it keeps pointing at the deleted files and shadows the .deb's icons in the shell.
+	@if [ -z "$(DESTDIR)" ] && command -v gtk-update-icon-cache >/dev/null 2>&1; then \
+		gtk-update-icon-cache -f -t "$(PREFIX)/share/icons/hicolor" >/dev/null 2>&1 || true; \
+	fi
 
 help:
 	@echo "Available make targets:"
