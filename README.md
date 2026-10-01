@@ -12,7 +12,8 @@ X11 screen picker and grew into a small artwork tool. Part of the `n.*` suite.
 
 **Colour**
 
-- Pick any colour on screen (via the bundled `xcolor` CLI) — HEX / RGB / HSL,
+- Pick any colour on screen (the desktop's own picker on Wayland, the bundled
+  `xcolor` CLI on X11) — HEX / RGB / HSL,
   copied to the clipboard.
 - Recent colours collect into a compact **History palette**.
 - **Palettes:** import `.gpl` / `.json`, export to GPL / CSS / JSON, named

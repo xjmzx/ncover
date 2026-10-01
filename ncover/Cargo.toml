@@ -1,6 +1,6 @@
 [package]
 name = "ncover"
-version = "0.1.0"
+version = "0.1.1"
 description = "n.cover — colour picker and cover / label artwork tool (GTK4)"
 authors = ["xjmzx"]
 license = "MIT"
@@ -24,3 +24,8 @@ roxmltree = "0.20"
 # The batch run happens on a worker thread; this carries its progress back to
 # the GTK main loop. glib::MainContext::channel is gone in glib 0.20.
 async-channel = "2"
+
+# Wayland screen pick: the Screenshot portal's PickColor. Linux only — the app
+# also builds on macOS, where there is no portal (and no screen pick).
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "screenshot"] }

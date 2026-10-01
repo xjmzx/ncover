@@ -65,8 +65,14 @@ bundle target, so a macOS build is run from `target/release/ncover`.
   builds, tests (45 passing) and runs on macOS **unmodified** against Homebrew
   `gtk4`, `gdk-pixbuf` and `librsvg` — verified 2026-09-22. This file used to
   claim the opposite; it was reasoning from the root crate.
-- **What macOS does lack is the screen pick.** `pick_color()` shells out to the
-  `xcolor` binary, so pick-from-anywhere is Linux only and any change near it
+- **The screen pick has two backends (2026-10-01).** On Wayland
+  `pick_color()` goes through the Screenshot portal's `PickColor` (ashpd,
+  `async-io`, driven by `glib::spawn_future_local`; a Linux-only target
+  dependency so macOS still builds). `xcolor` cannot work there: rootless
+  XWayland answers its root-window `GetImage` with BadMatch. On an X11
+  session it still shells out to `xcolor`.
+- **What macOS does lack is the screen pick.** Both backends are Linux
+  only, so pick-from-anywhere is Linux only and any change near it
   has to be settled on the Linux box. The *in-app* eyedropper — click a pixel
   on a loaded image, feeding history and palettes identically — is plain
   gdk-pixbuf and works everywhere, so colour-from-artwork is fully functional

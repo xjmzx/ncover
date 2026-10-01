@@ -239,10 +239,43 @@ fn find_xcolor() -> Option<PathBuf> {
     None
 }
 
+/// Whether GDK is on Wayland. There the `xcolor` CLI cannot work at all — a
+/// rootless XWayland refuses GetImage on the root window (BadMatch) — so the
+/// pick has to be the compositor's own, through the Screenshot portal.
+#[cfg(target_os = "linux")]
+fn on_wayland() -> bool {
+    gtk::gdk::Display::default().is_some_and(|d| d.type_().name() == "GdkWaylandDisplay")
+}
+
+#[cfg(target_os = "linux")]
+fn pick_color_portal<F>(parent: &ApplicationWindow, on_picked: F)
+where
+    F: Fn(Rgb) + 'static,
+{
+    use ashpd::desktop::{Color, ResponseError};
+    let parent = parent.clone();
+    glib::spawn_future_local(async move {
+        let picked = async { Color::pick().send().await?.response() }.await;
+        match picked {
+            Ok(c) => {
+                let ch = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                on_picked(Rgb { r: ch(c.red()), g: ch(c.green()), b: ch(c.blue()) });
+            }
+            // Esc in the compositor's picker: not an error worth a dialog.
+            Err(ashpd::Error::Response(ResponseError::Cancelled)) => {}
+            Err(e) => show_error(&parent, &format!("Screen pick failed: {e}")),
+        }
+    });
+}
+
 fn pick_color<F>(parent: &ApplicationWindow, on_picked: F)
 where
     F: Fn(Rgb) + 'static,
 {
+    #[cfg(target_os = "linux")]
+    if on_wayland() {
+        return pick_color_portal(parent, on_picked);
+    }
     let Some(bin) = find_xcolor() else {
         show_error(parent, "xcolor binary not found in PATH");
         return;

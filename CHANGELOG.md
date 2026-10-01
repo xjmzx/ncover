@@ -11,6 +11,14 @@ to diverge. Its version numbers are independent of these.
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-10-01
+
+### Fixed
+- Screen pick on Wayland. The `xcolor` CLI reads pixels from the X root
+  window, which a Wayland session's XWayland refuses, so *Pick* did nothing
+  useful there. On Wayland the app now asks the desktop to do the pick
+  (the Screenshot portal's `PickColor`); X11 sessions still use `xcolor`.
+
 ## [0.1.0] — 2026-09-23
 
 First tagged release. The app has existed for some time; this is the point it
