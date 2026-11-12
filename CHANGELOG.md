@@ -11,6 +11,35 @@ to diverge. Its version numbers are independent of these.
 
 ## [Unreleased]
 
+### Added
+- **Undo and redo** for the artwork: header buttons, Ctrl+Z, and Ctrl+Shift+Z
+  or Ctrl+Y. Every edit is a step: build steps, Reset, Fit / Cover / Centre /
+  1:1, and a canvas size change (undoing it puts the size picker back too).
+  A drag is one step however long it is, and a run of wheel zooms is one
+  step until you pause. Opening another image starts a new history. Ctrl+Z
+  in a text field still undoes the typing, not the canvas.
+- **Preview backdrop**: Checker, Grey, Black, White, or the current colour,
+  shown behind the canvas and the Result thumbnail so transparency can be
+  judged against what the artwork will sit on. It is never written to the
+  file, and undo leaves it alone, because it is a viewing condition rather
+  than part of the picture.
+
+### Fixed
+- **Changing the canvas size with an image open crashed the app.** The size
+  handler borrowed the placement mutably and immutably in one statement
+  (`RefCell already borrowed`), and the panic aborted the process from inside
+  the GTK callback. Present since the GUI was renamed to n.cover, so in 0.1.0
+  and 0.1.1.
+
+### Changed
+- The editor's document is now a value: a source plus an ordered list of
+  steps (`composition.rs`), rendered by one function. The preview, Save and
+  Overwrite all read that render, and every edit goes through one `mutate`.
+  Nothing about the app's behaviour or pixels changes. This is the groundwork
+  for undo and SVG export.
+- `main.rs` split into modules: `color`, `palette`, `samples`, `raster`,
+  `batch`, `svg`, `composition`. The UI stays in `main.rs`.
+
 ## [0.1.1] — 2026-10-01
 
 ### Fixed

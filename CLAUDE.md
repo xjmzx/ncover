@@ -51,6 +51,58 @@ Pass `PREFIX=$HOME/.local` for a user install, as the rest of the suite does.
 `.desktop` file, none of which mean anything off Linux. There is no `.app`
 bundle target, so a macOS build is run from `target/release/ncover`.
 
+## The shape: a composition, not a pipeline
+
+The open document is a **`Composition`** (`ncover/src/composition.rs`): a
+source plus an ordered list of **`Operation`**s. `render_raster` folds the
+list into a canvas, and that one render is what the preview draws and what
+Save / Overwrite write. Adding a capability means adding an `Operation` case
+and its arm in `render_raster`, not threading new state through the UI.
+
+- **Every edit goes through `mutate`** in `build_image_view`: clone the
+  current value, edit the copy, hand it over. It renders, and only a render
+  that succeeded becomes the document. Anything that writes `doc` directly is
+  a bug: the preview will not follow it, and once undo exists (a stack of
+  these values) it will not be undoable.
+- **`result` is a cache, not state.** It holds `render_raster(doc)` while the
+  document has build steps, and only `mutate` writes it. With no steps the
+  canvas draws the placed source live through Cairo instead, which keeps drag
+  and zoom cheap.
+- **The framing freezes once a step is added** (`has_build`), as it always
+  has: the steps were judged against that framing. Reset (`clear_build`)
+  unfreezes it. A size change rescales the framing and drops the steps
+  (`set_canvas`).
+- **Undo is `History`, two stacks of `Composition` values** (in
+  `composition.rs`, with its own tests). `mutate(next, group)` records the
+  document it replaces; `group` names a continuous gesture (`"drag"`,
+  `"zoom"`), and edits in the same group less than `COALESCE` apart are one
+  step. Drag-begin calls `break_group`, so two drags are two steps. A no-op
+  edit (`prev == next`) records nothing. Opening an image calls
+  `show_doc` and clears the history: a new document, not an edit.
+- **`show_doc` puts a document on screen without recording it.** Undo and
+  redo use it. It also moves the size picker and `canvas` to the document's
+  size, setting `canvas` FIRST so the picker's handler sees no change and
+  does not record a second edit.
+- **Ctrl+Z is a bubble-phase `ShortcutController` on the window, not
+  `set_accels_for_action`.** Application accels fire before the focused
+  widget, so Ctrl+Z typed into the batch filter undid a canvas step instead
+  of the typing. Bubbling lets a text field handle its own undo first.
+- **The backdrop is preview-only and must stay that way.** `paint_backdrop`
+  is called by the canvas and the Result thumbnail, never by a renderer, and
+  it is not part of `Composition`, so undo leaves it alone. Anything that
+  composites it into `render_raster` is a data bug: the backdrop exists to
+  show what the transparent pixels will sit on, which only works if they stay
+  transparent in the file.
+- **Do not hold a `RefCell` borrow across `mutate`.** Read the value into a
+  local first (`let next = doc.borrow().clone();`), then call. The size
+  handler used to write `*place.borrow_mut() = place.borrow()…` in one
+  statement, and the right-hand side's borrow lives to the end of the
+  statement: a panic that aborted the app on every size change.
+
+The macOS sibling has the same shape (`Composition.swift`). That is a shared
+idea, not shared code, and `docs/macos-parity-plan.md` is the plan for
+porting further features across.
+
 ## Traps specific to this repo
 
 - **The root crate is `xcolor`, not `ncover`.** This repo is a fork of the
