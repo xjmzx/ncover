@@ -11,6 +11,8 @@ to diverge. Its version numbers are independent of these.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-11-13
+
 ### Added
 - **Undo and redo** for the artwork: header buttons, Ctrl+Z, and Ctrl+Shift+Z
   or Ctrl+Y. Every edit is a step: build steps, Reset, Fit / Cover / Centre /
@@ -70,5 +72,7 @@ became installable from a release rather than only from source.
   a Preview contact sheet and a dry run. It never writes over the source.
 - Save as PNG, or overwrite the original PNG in place.
 
-[Unreleased]: https://github.com/xjmzx/ncover/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/xjmzx/ncover/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/xjmzx/ncover/releases/tag/v0.2.0
+[0.1.1]: https://github.com/xjmzx/ncover/releases/tag/v0.1.1
 [0.1.0]: https://github.com/xjmzx/ncover/releases/tag/v0.1.0
