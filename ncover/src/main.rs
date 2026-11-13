@@ -935,6 +935,37 @@ fn build_batch(
     row_r.append(&size_note);
     body.append(&row_r);
 
+    // --- what it will touch: the survey, kept current while you type ---
+    let survey_lbl = Label::new(Some("Choose a source folder."));
+    survey_lbl.add_css_class("dim-label");
+    survey_lbl.set_xalign(0.0);
+    survey_lbl.set_wrap(true);
+    body.append(&survey_lbl);
+    let survey_list = ListBox::new();
+    survey_list.set_selection_mode(gtk::SelectionMode::None);
+    let survey_scroll = gtk::ScrolledWindow::new();
+    survey_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    survey_scroll.set_min_content_height(80);
+    survey_scroll.set_max_content_height(220);
+    survey_scroll.set_propagate_natural_height(true);
+    survey_scroll.set_child(Some(&survey_list));
+    let survey_exp = gtk::Expander::new(Some("Files"));
+    survey_exp.set_child(Some(&survey_scroll));
+    survey_exp.set_visible(false);
+    body.append(&survey_exp);
+
+    // --- what it will look like: the first few, rendered unasked ---
+    let samples_row = GBox::new(Orientation::Vertical, 4);
+    let samples_box = GBox::new(Orientation::Horizontal, 8);
+    let samples_note = Label::new(None);
+    samples_note.add_css_class("dim-label");
+    samples_note.set_xalign(0.0);
+    samples_note.set_wrap(true);
+    samples_row.append(&samples_box);
+    samples_row.append(&samples_note);
+    samples_row.set_visible(false);
+    body.append(&samples_row);
+
     // --- run ---
     let row_go = GBox::new(Orientation::Horizontal, 6);
     let b_preview = Button::with_label("Preview");
@@ -1093,39 +1124,38 @@ fn build_batch(
         move |dd| note.set_text(&note_from(dd.selected()))
     ));
 
-    // Where the images come from — folder or manifest — with the errors shown.
-    // Shared by Run and Preview so they can never disagree about the set.
-    let resolve_scope: Rc<dyn Fn() -> Option<Scope>> = {
-        let window = window.clone();
+    // Where the images come from — folder or manifest. Shared by Run, Preview,
+    // the survey and the samples, so none of them can disagree about the set.
+    // `scope_now` says why not as a plain string; `resolve_scope` (the buttons)
+    // shows that string as a dialog.
+    let scope_now: Rc<dyn Fn() -> std::result::Result<Scope, String>> = {
         let dd_scope = dd_scope.clone();
         let manifest = manifest.clone();
         let src = src.clone();
         Rc::new(move || {
             if dd_scope.selected() == 1 {
                 match manifest.borrow().as_ref() {
-                    Some(m) => Some(Scope::published(m)),
-                    None => {
-                        show_error(&window, "The published discography could not be read. Re-select the scope, or point ndisc at Export.");
-                        None
-                    }
+                    Some(m) => Ok(Scope::published(m)),
+                    None => Err("The published discography could not be read. Re-select the scope, or point ndisc at Export.".into()),
                 }
             } else {
                 match src.borrow().clone() {
-                    Some(s) => Some(Scope::folder(s)),
-                    None => {
-                        show_error(&window, "Choose a source folder.");
-                        None
-                    }
+                    Some(s) => Ok(Scope::folder(s)),
+                    None => Err("Choose a source folder.".into()),
                 }
             }
         })
+    };
+    let resolve_scope: Rc<dyn Fn() -> Option<Scope>> = {
+        let window = window.clone();
+        let scope_now = scope_now.clone();
+        Rc::new(move || scope_now().map_err(|e| show_error(&window, &e)).ok())
     };
 
     // The recipe as currently dialled in. The disc fill resolves from the picked
     // colours ONCE here, so every file in a run gets the same fill even if you
     // pick while it runs — and a Preview shows exactly that fill.
-    let resolve_recipe: Rc<dyn Fn() -> Option<Recipe>> = {
-        let window = window.clone();
+    let recipe_now: Rc<dyn Fn() -> std::result::Result<Recipe, String>> = {
         let shared = shared.clone();
         let canvas = canvas.clone();
         let dd_frame = dd_frame.clone();
@@ -1144,20 +1174,14 @@ fn build_batch(
                 2 => Some(OuterFill::White),
                 3 => match cur {
                     Some(c) => Some(OuterFill::Solid(c)),
-                    None => {
-                        show_error(&window, "Pick a colour first — that is the fill.");
-                        return None;
-                    }
+                    None => return Err("Pick a colour first — that is the fill.".into()),
                 },
                 _ => match (cur, prev) {
                     (Some(i), Some(o)) => Some(OuterFill::Gradient { inner: i, outer: o }),
-                    _ => {
-                        show_error(&window, "A gradient needs two colours — pick a second one.");
-                        return None;
-                    }
+                    _ => return Err("A gradient needs two colours — pick a second one.".into()),
                 },
             };
-            Some(Recipe {
+            Ok(Recipe {
                 canvas: canvas.get(),
                 framing: if dd_frame.selected() == 1 {
                     Framing::Fit
@@ -1167,6 +1191,11 @@ fn build_batch(
                 disc,
             })
         })
+    };
+    let resolve_recipe: Rc<dyn Fn() -> Option<Recipe>> = {
+        let window = window.clone();
+        let recipe_now = recipe_now.clone();
+        Rc::new(move || recipe_now().map_err(|e| show_error(&window, &e)).ok())
     };
 
     let run = {
@@ -1205,26 +1234,21 @@ fn build_batch(
 
             let (tx, rx) = async_channel::unbounded::<BatchMsg>();
             let worker_stop = stop.clone();
-            let Scope { roots, strip, .. } = scope;
+            let strip = scope.strip.clone();
             std::thread::spawn(move || {
                 // Discovery is on the worker too: walking a music library is
                 // thousands of directories (one per release, under published
                 // scope), and a frozen window during the "scanning…" step is
-                // still a frozen window.
-                let mut files = Vec::new();
-                for root in &roots {
-                    if let Err(e) = find_images(root, &needle, &mut files) {
-                        // One unreadable release dir is not fatal to the run.
-                        let _ = tx.send_blocking(BatchMsg::One {
-                            rel: root.display().to_string(),
-                            result: Err(format!("{e}")),
-                        });
-                    }
+                // still a frozen window. `find_in_scope` is the walk the
+                // survey counted, so the Run button's number is this set.
+                let (files, unreadable) = find_in_scope(&scope, &needle);
+                for (root, e) in unreadable {
+                    // One unreadable release dir is not fatal to the run.
+                    let _ = tx.send_blocking(BatchMsg::One {
+                        rel: root.display().to_string(),
+                        result: Err(e),
+                    });
                 }
-                // Release dirs are disjoint and a folder is walked once, so this
-                // is belt-and-braces — but a duplicate would be a wasted write.
-                files.sort();
-                files.dedup();
                 let _ = tx.send_blocking(BatchMsg::Total(files.len()));
 
                 let (mut ok, mut failed) = (0usize, 0usize);
@@ -1393,34 +1417,19 @@ fn build_batch(
             b_preview.set_sensitive(false);
 
             let (tx, rx) = async_channel::unbounded::<PreviewMsg>();
-            let Scope { roots, strip, .. } = scope;
             std::thread::spawn(move || {
-                let mut files = Vec::new();
-                for root in &roots {
-                    let _ = find_images(root, &needle, &mut files);
-                }
-                files.sort();
-                files.dedup();
+                let (files, _) = find_in_scope(&scope, &needle);
+                let strip = scope.strip;
                 let _ = tx.send_blocking(PreviewMsg::Total(files.len()));
                 // Render only the first N. Pixbuf work off the main thread is
                 // fine — it is image data, never GTK — and only the RGBA bytes
                 // (Send) cross back.
                 for f in files.iter().take(PREVIEW_N) {
                     let label = f.strip_prefix(&strip).unwrap_or(f).display().to_string();
-                    let msg = match batch_render(f, recipe)
-                        .and_then(|pb| {
-                            pb.scale_simple(PREVIEW_PX, PREVIEW_PX, gdk_pixbuf::InterpType::Bilinear)
-                                .context("could not scale the thumbnail")
-                        }) {
+                    let msg = match render_thumb(f, recipe, PREVIEW_PX) {
                         Ok(t) => PreviewMsg::Thumb {
                             label,
-                            thumb: Some((
-                                unsafe { t.pixels() }.to_vec(),
-                                t.width(),
-                                t.height(),
-                                t.rowstride(),
-                                t.has_alpha(),
-                            )),
+                            thumb: Some(t),
                             err: None,
                         },
                         Err(e) => PreviewMsg::Thumb {
@@ -1455,40 +1464,10 @@ fn build_batch(
                             }
                             PreviewMsg::Thumb { label, thumb, err } => {
                                 shown += 1;
-                                let cell = GBox::new(Orientation::Vertical, 2);
-                                match thumb {
-                                    Some((bytes, w, h, rowstride, has_alpha)) => {
-                                        let pb = gdk_pixbuf::Pixbuf::from_bytes(
-                                            &glib::Bytes::from_owned(bytes),
-                                            gdk_pixbuf::Colorspace::Rgb,
-                                            has_alpha,
-                                            8,
-                                            w,
-                                            h,
-                                            rowstride,
-                                        );
-                                        let tex = gtk::gdk::Texture::for_pixbuf(&pb);
-                                        let pic = gtk::Picture::for_paintable(&tex);
-                                        pic.set_size_request(PREVIEW_PX, PREVIEW_PX);
-                                        pic.add_css_class("frame");
-                                        cell.append(&pic);
-                                    }
-                                    None => {
-                                        failed += 1;
-                                        let x = Label::new(Some("render failed"));
-                                        x.add_css_class("error");
-                                        x.set_size_request(PREVIEW_PX, PREVIEW_PX);
-                                        x.set_wrap(true);
-                                        x.set_tooltip_text(err.as_deref());
-                                        cell.append(&x);
-                                    }
+                                if thumb.is_none() {
+                                    failed += 1;
                                 }
-                                let cap = Label::new(Some(&label));
-                                cap.add_css_class("dim-label");
-                                cap.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-                                cap.set_max_width_chars(18);
-                                cap.set_tooltip_text(Some(&label));
-                                cell.append(&cap);
+                                let cell = thumb_cell(&label, thumb, err.as_deref(), PREVIEW_PX, 18);
                                 preview_flow.insert(&cell, -1);
                             }
                             PreviewMsg::Done => {
@@ -1536,7 +1515,325 @@ fn build_batch(
     exp.set_label_widget(Some(&head));
     exp.set_child(Some(&body));
     exp.set_expanded(false);
+
+    // ---------- keeping the survey and the sample current ----------
+    //
+    // One ticker rather than a handler per control. Every input the survey
+    // reads is gathered into `scope_key`, and every input the sample reads
+    // into `sample_key` (the scope key plus the resolved recipe, which
+    // includes the picked colours — changes that fire no signal here). A key
+    // that differs from what is on screen and has held for one tick is
+    // applied: that is the debounce, so typing a filter walks the tree once
+    // it pauses, not per keystroke. Nothing on screen can be stale for more
+    // than a tick or two, because nothing can change without changing a key.
+    let survey_gen = Rc::new(Cell::new(0u64));
+    let sample_gen = Rc::new(Cell::new(0u64));
+    let shown_scope: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let pending_scope: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let shown_sample: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let pending_sample: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let survey_now: Rc<RefCell<Option<(Survey, PathBuf)>>> = Rc::new(RefCell::new(None));
+    let is_published = {
+        let dd_scope = dd_scope.clone();
+        move || dd_scope.selected() == 1
+    };
+    let scope_key = {
+        let dd_scope = dd_scope.clone();
+        let src = src.clone();
+        let manifest = manifest.clone();
+        let e_match = e_match.clone();
+        move || {
+            format!(
+                "{}|{:?}|{}|{}",
+                dd_scope.selected(),
+                src.borrow(),
+                manifest.borrow().is_some(),
+                e_match.text()
+            )
+        }
+    };
+    let exp_w = exp.downgrade();
+    glib::timeout_add_local(std::time::Duration::from_millis(300), move || {
+        let Some(exp) = exp_w.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        // Collapsed: nobody is looking. A run in flight: it owns the CPU.
+        if !exp.is_expanded() || !b_run.is_sensitive() {
+            return glib::ControlFlow::Continue;
+        }
+        let skey = scope_key();
+        if shown_scope.borrow().as_ref() != Some(&skey) {
+            // The count on the button is about to be wrong; stop promising it.
+            b_run.set_label("Run");
+            if pending_scope.borrow().as_ref() != Some(&skey) {
+                *pending_scope.borrow_mut() = Some(skey);
+                return glib::ControlFlow::Continue;
+            }
+            *shown_scope.borrow_mut() = Some(skey.clone());
+            *survey_now.borrow_mut() = None;
+            *shown_sample.borrow_mut() = None;
+            let g = survey_gen.get() + 1;
+            survey_gen.set(g);
+            let scope = match scope_now() {
+                Ok(s) => s,
+                Err(e) => {
+                    survey_lbl.set_text(&e);
+                    survey_exp.set_visible(false);
+                    samples_row.set_visible(false);
+                    return glib::ControlFlow::Continue;
+                }
+            };
+            survey_lbl.set_text("looking…");
+            // Prime the sample's debounce: when the survey lands, the sample
+            // for the recipe as it is NOW renders on the next tick.
+            *pending_sample.borrow_mut() = Some(format!("{skey}|{:?}", recipe_now()));
+            let needle = e_match.text().to_string();
+            let strip = scope.strip.clone();
+            let (tx, rx) = async_channel::bounded::<Survey>(1);
+            let walk_needle = needle.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send_blocking(survey_batch(&scope, &walk_needle, SAMPLE_N));
+            });
+            let what = if is_published() { "release" } else { "folder" };
+            glib::spawn_future_local(clone!(
+                #[strong]
+                survey_gen,
+                #[strong]
+                survey_now,
+                #[weak]
+                survey_lbl,
+                #[weak]
+                survey_list,
+                #[weak]
+                survey_exp,
+                #[weak]
+                b_run,
+                async move {
+                    let Ok(s) = rx.recv().await else { return };
+                    if survey_gen.get() != g {
+                        return; // the scope or filter moved on while we walked
+                    }
+                    show_survey(&s, what, &needle, &survey_lbl, &survey_list, &survey_exp);
+                    b_run.set_label(&format!(
+                        "Run ({} file{})",
+                        s.total,
+                        if s.total == 1 { "" } else { "s" }
+                    ));
+                    *survey_now.borrow_mut() = Some((s, strip));
+                }
+            ));
+            return glib::ControlFlow::Continue;
+        }
+
+        // The survey is current. Is the sample?
+        let Some((first, strip)) = survey_now
+            .borrow()
+            .as_ref()
+            .map(|(s, strip)| (s.first.clone(), strip.clone()))
+        else {
+            return glib::ControlFlow::Continue; // still walking
+        };
+        let recipe = recipe_now();
+        let rkey = format!("{skey}|{recipe:?}");
+        if shown_sample.borrow().as_ref() == Some(&rkey) {
+            return glib::ControlFlow::Continue;
+        }
+        if pending_sample.borrow().as_ref() != Some(&rkey) {
+            *pending_sample.borrow_mut() = Some(rkey);
+            return glib::ControlFlow::Continue;
+        }
+        *shown_sample.borrow_mut() = Some(rkey);
+        let g = sample_gen.get() + 1;
+        sample_gen.set(g);
+        let recipe = match recipe {
+            Ok(r) => r,
+            Err(e) => {
+                while let Some(c) = samples_box.first_child() {
+                    samples_box.remove(&c);
+                }
+                samples_note.set_text(&e);
+                samples_row.set_visible(!first.is_empty());
+                return glib::ControlFlow::Continue;
+            }
+        };
+        if first.is_empty() {
+            samples_row.set_visible(false);
+            return glib::ControlFlow::Continue;
+        }
+        samples_row.set_visible(true);
+        samples_note.set_text("rendering…");
+        let n = first.len();
+        let (tx, rx) = async_channel::bounded::<Vec<(String, std::result::Result<ThumbBytes, String>)>>(1);
+        std::thread::spawn(move || {
+            let out = first
+                .iter()
+                .map(|f| {
+                    let label = f.strip_prefix(&strip).unwrap_or(f).display().to_string();
+                    (label, render_thumb(f, recipe, SAMPLE_PX).map_err(|e| format!("{e:#}")))
+                })
+                .collect();
+            let _ = tx.send_blocking(out);
+        });
+        glib::spawn_future_local(clone!(
+            #[strong]
+            sample_gen,
+            #[weak]
+            samples_box,
+            #[weak]
+            samples_note,
+            async move {
+                let Ok(thumbs) = rx.recv().await else { return };
+                if sample_gen.get() != g {
+                    return;
+                }
+                // Swap all at once: four cells blinking out one by one while
+                // a slider moves reads as the app struggling.
+                while let Some(c) = samples_box.first_child() {
+                    samples_box.remove(&c);
+                }
+                let mut failed = 0;
+                for (label, t) in thumbs {
+                    let (thumb, err) = match t {
+                        Ok(t) => (Some(t), None),
+                        Err(e) => {
+                            failed += 1;
+                            (None, Some(e))
+                        }
+                    };
+                    samples_box.append(&thumb_cell(&label, thumb, err.as_deref(), SAMPLE_PX, 12));
+                }
+                samples_note.set_text(&format!(
+                    "The first {n}, through the same renderer the run uses{}. Preview shows {PREVIEW_N}.",
+                    if failed > 0 {
+                        format!(" · {failed} would fail (hover for why)")
+                    } else {
+                        String::new()
+                    }
+                ));
+            }
+        ));
+        glib::ControlFlow::Continue
+    });
+
     exp
+}
+
+/// Fill the survey readout: a headline, and a list of what each release or
+/// folder contributes. The list is capped like the results list, and says so.
+fn show_survey(s: &Survey, what: &str, needle: &str, lbl: &Label, list: &ListBox, exp: &gtk::Expander) {
+    let plural = |n: usize, w: &str| format!("{n} {w}{}", if n == 1 { "" } else { "s" });
+    lbl.remove_css_class("error");
+    if s.total == 0 {
+        lbl.add_css_class("error");
+        lbl.set_text(&if needle.is_empty() {
+            "No images found under that scope.".to_string()
+        } else {
+            format!("Nothing matches \u{201c}{needle}\u{201d}. Clear the filter to take every image.")
+        });
+    } else {
+        let mut t = format!("{} in {}", plural(s.total, "image"), plural(s.groups.len(), what));
+        if s.empty_roots > 0 {
+            t += &format!(" · {} matched nothing", plural(s.empty_roots, what));
+        }
+        if s.unreadable > 0 {
+            t += &format!(" · {} could not be read", plural(s.unreadable, what));
+        }
+        lbl.set_text(&t);
+    }
+    while let Some(c) = list.first_child() {
+        list.remove(&c);
+    }
+    let mut rows = 0usize;
+    let mut left = 0usize;
+    for g in &s.groups {
+        if rows >= RESULT_ROWS {
+            left += 1;
+            continue;
+        }
+        let head = Label::new(Some(&format!("{}  \u{b7}  {}", g.name, g.files.len())));
+        head.set_xalign(0.0);
+        head.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        head.set_margin_start(6);
+        list.append(&head);
+        rows += 1;
+        for f in &g.files {
+            let l = Label::new(Some(f));
+            l.set_xalign(0.0);
+            l.set_ellipsize(gtk::pango::EllipsizeMode::Start);
+            l.add_css_class("dim-label");
+            l.add_css_class("monospace");
+            l.set_margin_start(18);
+            list.append(&l);
+            rows += 1;
+        }
+    }
+    if left > 0 {
+        let l = Label::new(Some(&format!(
+            "\u{2026} and {} more (the list caps at {RESULT_ROWS} rows; the count above is complete)",
+            plural(left, what)
+        )));
+        l.set_xalign(0.0);
+        l.add_css_class("dim-label");
+        l.set_margin_start(6);
+        list.append(&l);
+    }
+    exp.set_label(Some(&format!("Files ({})", s.total)));
+    exp.set_visible(s.total > 0);
+}
+
+/// One thumbnail with its caption, or the failure in its place — a preview
+/// that leaves out the files that would fail lies about what the run will do.
+/// Used by the Preview contact sheet and the automatic sample alike.
+fn thumb_cell(label: &str, thumb: Option<ThumbBytes>, err: Option<&str>, px: i32, chars: i32) -> GBox {
+    let cell = GBox::new(Orientation::Vertical, 2);
+    match thumb {
+        Some((bytes, w, h, rowstride, has_alpha)) => {
+            let pb = gdk_pixbuf::Pixbuf::from_bytes(
+                &glib::Bytes::from_owned(bytes),
+                gdk_pixbuf::Colorspace::Rgb,
+                has_alpha,
+                8,
+                w,
+                h,
+                rowstride,
+            );
+            let tex = gtk::gdk::Texture::for_pixbuf(&pb);
+            let pic = gtk::Picture::for_paintable(&tex);
+            pic.set_size_request(px, px);
+            pic.add_css_class("frame");
+            pic.set_tooltip_text(Some(label));
+            cell.append(&pic);
+        }
+        None => {
+            let x = Label::new(Some("render failed"));
+            x.add_css_class("error");
+            x.set_size_request(px, px);
+            x.set_wrap(true);
+            x.set_tooltip_text(err);
+            cell.append(&x);
+        }
+    }
+    // Two lines: the folder, then the file. Across a library every file is
+    // cover.png, so a single ellipsized path shows the one part that is the
+    // same everywhere and cuts the part that tells them apart.
+    let p = Path::new(label);
+    let (dir, file) = match (p.parent().filter(|d| !d.as_os_str().is_empty()), p.file_name()) {
+        (Some(d), Some(f)) => (d.display().to_string(), f.to_string_lossy().into_owned()),
+        _ => (label.to_string(), String::new()),
+    };
+    for (text, class) in [(dir, "dim-label"), (file, "caption")] {
+        if text.is_empty() {
+            continue;
+        }
+        let cap = Label::new(Some(&text));
+        cap.add_css_class("dim-label");
+        cap.add_css_class(class);
+        cap.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        cap.set_max_width_chars(chars);
+        cap.set_tooltip_text(Some(label));
+        cell.append(&cap);
+    }
+    cell
 }
 
 /// Which of the two the big canvas is showing. The right rail flips between the
@@ -3648,6 +3945,20 @@ fn build_ui(app: &Application) {
     image_slot.set_hexpand(true);
     image_slot.set_vexpand(true);
 
+    // The image column scrolls too, for the same reason: an open Batch
+    // section (survey, sample, contact sheet, results) is taller than a
+    // laptop screen, and without this it pushes the window off the bottom.
+    // A ScrolledWindow gives its child at least the viewport, so with Batch
+    // closed the canvas still expands to fill the window as before.
+    let image_scroll = gtk::ScrolledWindow::new();
+    image_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    image_scroll.set_child(Some(&image_slot));
+    // Open at the column's natural height, as the window did before it
+    // scrolled; only growth past that (Batch opening) scrolls.
+    image_scroll.set_propagate_natural_height(true);
+    image_scroll.set_hexpand(true);
+    image_scroll.set_vexpand(true);
+
     let columns = GBox::new(Orientation::Horizontal, 12);
     columns.set_margin_top(12);
     columns.set_margin_bottom(12);
@@ -3655,7 +3966,7 @@ fn build_ui(app: &Application) {
     columns.set_margin_end(12);
     columns.append(&left_scroll);
     columns.append(&Separator::new(Orientation::Vertical));
-    columns.append(&image_slot);
+    columns.append(&image_scroll);
 
     // Two pages behind the header switch: the picker, and the full palettes view.
     let stack = gtk::Stack::new();

@@ -181,6 +181,30 @@ using most.
 
 Release as **0.5.0**.
 
+**Status (2026-11-13): done** on `main`, uncommitted, not released (taken
+before phases 2 and 3, so it will not ship as 0.5.0). 64 tests (+5, three
+ported from the Mac `BatchTests` under their own names). Verified in
+Xephyr against a fixture library and a fake `published.json`: the survey
+counts, manifest names, empty and unreadable releases, "Run (N files)",
+the debounced filter, the four samples following the disc choice, and a
+failing file in Preview. How it differs from the plan or the Mac:
+- **Failure reasons were already there.** The `Err(_) => failed += 1` the
+  plan pointed at only counts; the row beside it always showed the reason,
+  and Preview always showed failing files.
+- **One walk, not two that agree.** `walk_scope` is the only place a scope
+  is walked; `find_in_scope` (run, preview) and `survey_batch` both read it.
+  The old run de-duplicated with `sort + dedup`, which is the same set, but
+  now there is nothing that can drift.
+- **A ticker instead of per-control handlers.** Every input goes into a
+  key that is checked every 300 ms. That also catches the picked colours,
+  which feed the Colour and Gradient fills and fire no signal in the batch
+  panel. The Mac keys its sample on its own colour well, which Linux does
+  not have.
+- **Unreadable releases are counted separately** from releases that
+  matched nothing (a manifest dir that no longer exists is not "no cover").
+- The image column now scrolls. With the survey and sample, an open Batch
+  was taller than the screen and pushed the window off the bottom.
+
 ## Phase 5: type
 
 Needs phase 3 for the vector half. This is the part that differs most from
@@ -232,7 +256,7 @@ Release as **0.6.0**.
 | 4 | Batch survey, auto-preview, failure reasons | M | — |
 | 5 | Type + colour-well popovers | L | 3 |
 
-Recommended: **0 → 1 → 4 → 2 → 3 → 5.** Phase 0 de-risks everything, and
+Recommended: **0 → 1 → 4 → 2 → 3 → 5.** (0, 1 and 4 done 2026-11-13.) Phase 0 de-risks everything, and
 phase 1 is the cheapest visible win. Phase 4 is independent and the most
 useful day to day. Type comes last because it is the largest and needs vector
 export to be worth having.

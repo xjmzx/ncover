@@ -19,13 +19,13 @@ pub(crate) const IMAGE_EXTS: [&str; 5] = ["png", "jpg", "jpeg", "webp", "svg"];
 /// A silent truncation reads as "that was everything".
 pub(crate) const RESULT_ROWS: usize = 300;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Framing {
     Cover,
     Fit,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Recipe {
     pub(crate) canvas: i32,
     pub(crate) framing: Framing,
@@ -98,7 +98,7 @@ pub(crate) fn find_images(root: &Path, needle: &str, into: &mut Vec<PathBuf>) ->
 // nothing and turns "disc-label every published release" into one choice.
 
 /// ndisc's export: the releases it has published, each with its on-disk dir.
-/// Only the fields batch needs — serde ignores the rest (id, artist, title…).
+/// Only the fields batch needs — serde ignores the rest (id, …).
 #[derive(serde::Deserialize)]
 pub(crate) struct Manifest {
     #[serde(rename = "libraryRoot")]
@@ -109,6 +109,13 @@ pub(crate) struct Manifest {
 #[derive(serde::Deserialize)]
 pub(crate) struct ManifestRelease {
     pub(crate) dir: PathBuf,
+    /// Kept so the survey can name a release as a record ("Artist — Title")
+    /// rather than as a path. Optional: an older manifest without them still
+    /// loads, and the release is named by its folder instead.
+    #[serde(default)]
+    pub(crate) artist: Option<String>,
+    #[serde(default)]
+    pub(crate) title: Option<String>,
 }
 
 /// Where ndisc writes it. `None` if it has never exported one — in which case
@@ -140,6 +147,9 @@ pub(crate) struct Scope {
     pub(crate) strip: PathBuf,
     /// The source boundary the guard protects. The originals live under here.
     pub(crate) guard_root: PathBuf,
+    /// Display names for walk roots, where something better than the path is
+    /// known: "Artist — Title" from the manifest. Empty for a folder.
+    pub(crate) names: HashMap<PathBuf, String>,
 }
 
 impl Scope {
@@ -148,6 +158,7 @@ impl Scope {
             roots: vec![root.clone()],
             strip: root.clone(),
             guard_root: root,
+            names: HashMap::new(),
         }
     }
 
@@ -159,7 +170,135 @@ impl Scope {
             roots: m.releases.iter().map(|r| r.dir.clone()).collect(),
             strip: m.library_root.clone(),
             guard_root: m.library_root.clone(),
+            names: m
+                .releases
+                .iter()
+                .filter_map(|r| match (r.artist.as_deref(), r.title.as_deref()) {
+                    (Some(a), Some(t)) if !a.is_empty() && !t.is_empty() => {
+                        Some((r.dir.clone(), format!("{a} \u{2014} {t}")))
+                    }
+                    _ => None,
+                })
+                .collect(),
         }
+    }
+
+    /// What to call a walk root in the survey: the manifest's name, else its
+    /// path under the strip prefix, else (a folder scope, root == strip) its
+    /// own folder name.
+    pub(crate) fn name_of(&self, root: &Path) -> String {
+        if let Some(n) = self.names.get(root) {
+            return n.clone();
+        }
+        match root.strip_prefix(&self.strip) {
+            Ok(rel) if !rel.as_os_str().is_empty() => rel.display().to_string(),
+            _ => root
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| root.display().to_string()),
+        }
+    }
+}
+
+// ---------- what a run would touch ----------
+//
+// The survey and the run must select EXACTLY the same files, or the count on
+// the Run button is a lie. So there is one walk, `walk_scope`, and both read
+// it: `find_in_scope` flattens it for a run or a preview, `survey_batch`
+// groups it for display. They cannot de-duplicate differently because neither
+// de-duplicates at all.
+
+/// Walk roots that could not be read, each with the reason.
+pub(crate) type Unreadable = Vec<(PathBuf, String)>;
+
+/// Every matching image, tagged with the index of the root that found it. A
+/// file reachable from two roots (nested release dirs) belongs to the FIRST
+/// root that found it and appears once. Unreadable roots come back as errors
+/// alongside, so a run can report them and a survey can count them.
+pub(crate) fn walk_scope(scope: &Scope, needle: &str) -> (Vec<(usize, PathBuf)>, Unreadable) {
+    let mut seen = std::collections::HashSet::new();
+    let mut hits = Vec::new();
+    let mut errors = Vec::new();
+    for (i, root) in scope.roots.iter().enumerate() {
+        let mut found = Vec::new();
+        if let Err(e) = find_images(root, needle, &mut found) {
+            errors.push((root.clone(), format!("{e:#}")));
+        }
+        for f in found {
+            if seen.insert(f.clone()) {
+                hits.push((i, f));
+            }
+        }
+    }
+    (hits, errors)
+}
+
+/// The files a run processes, in the stable order a dry run and a real run
+/// share.
+pub(crate) fn find_in_scope(scope: &Scope, needle: &str) -> (Vec<PathBuf>, Unreadable) {
+    let (hits, errors) = walk_scope(scope, needle);
+    let mut files: Vec<PathBuf> = hits.into_iter().map(|(_, f)| f).collect();
+    files.sort();
+    (files, errors)
+}
+
+/// One walk root that matched something.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SurveyGroup {
+    pub(crate) name: String,
+    /// Paths relative to the scope's strip prefix, sorted.
+    pub(crate) files: Vec<String>,
+}
+
+/// What a scope and a filter select, before anything is decoded. Cheap enough
+/// to keep current while the filter is typed: a filter whose effect you cannot
+/// see is a guess.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Survey {
+    /// Sorted by name.
+    pub(crate) groups: Vec<SurveyGroup>,
+    pub(crate) total: usize,
+    /// Roots that matched nothing. Counted, not listed: "9 releases have no
+    /// cover" is the useful form.
+    pub(crate) empty_roots: usize,
+    /// Roots that could not be read at all.
+    pub(crate) unreadable: usize,
+    /// The first files in RUN order, for the automatic sample — so the sample
+    /// is literally what a run starts with.
+    pub(crate) first: Vec<PathBuf>,
+}
+
+pub(crate) fn survey_batch(scope: &Scope, needle: &str, first_n: usize) -> Survey {
+    let (hits, errors) = walk_scope(scope, needle);
+    let mut by_root: Vec<Vec<String>> = vec![Vec::new(); scope.roots.len()];
+    let mut all: Vec<&PathBuf> = Vec::with_capacity(hits.len());
+    for (i, f) in &hits {
+        by_root[*i].push(f.strip_prefix(&scope.strip).unwrap_or(f).display().to_string());
+        all.push(f);
+    }
+    all.sort();
+    let unreadable = errors.len();
+    let bad: std::collections::HashSet<&PathBuf> = errors.iter().map(|(r, _)| r).collect();
+    let mut groups = Vec::new();
+    let mut empty_roots = 0;
+    for (i, mut files) in by_root.into_iter().enumerate() {
+        let root = &scope.roots[i];
+        if files.is_empty() {
+            if !bad.contains(root) {
+                empty_roots += 1;
+            }
+            continue;
+        }
+        files.sort();
+        groups.push(SurveyGroup { name: scope.name_of(root), files });
+    }
+    groups.sort_by_key(|g| g.name.to_lowercase());
+    Survey {
+        total: hits.len(),
+        groups,
+        empty_roots,
+        unreadable,
+        first: all.into_iter().take(first_n).cloned().collect(),
     }
 }
 
@@ -295,6 +434,28 @@ pub(crate) const PREVIEW_N: usize = 12;
 /// Thumbnail side, px. Big enough to see a bad crop or a wrong corner fill.
 pub(crate) const PREVIEW_PX: i32 = 132;
 
+/// How many outputs render themselves, unasked, whenever the scope or the
+/// recipe settles. Four, not twelve, because it re-runs on every change — and
+/// it exists because a preview you must press is one you can forget to press,
+/// which is how a folder of covers comes out as discs.
+pub(crate) const SAMPLE_N: usize = 4;
+
+/// Sample thumbnail side, px.
+pub(crate) const SAMPLE_PX: i32 = 88;
+
+/// A thumbnail's raw parts: `(rgba, w, h, rowstride, has_alpha)`. Pixbuf is
+/// `!Send`; these bytes are, so this is what crosses back from a worker.
+pub(crate) type ThumbBytes = (Vec<u8>, i32, i32, i32, bool);
+
+/// Render one file through the recipe and shrink it to a `px` thumbnail —
+/// through `batch_render`, the same function a run writes from.
+pub(crate) fn render_thumb(src: &Path, r: Recipe, px: i32) -> Result<ThumbBytes> {
+    let t = batch_render(src, r)?
+        .scale_simple(px, px, gdk_pixbuf::InterpType::Bilinear)
+        .context("could not scale the thumbnail")?;
+    Ok((unsafe { t.pixels() }.to_vec(), t.width(), t.height(), t.rowstride(), t.has_alpha()))
+}
+
 /// A rendered thumbnail on its way back from the worker. Pixbuf is `!Send`, so it
 /// cannot cross the thread — the raw RGBA bytes (which ARE Send) do, and the main
 /// thread rebuilds the pixbuf. Rendering itself is fine off-thread: it is pure
@@ -306,7 +467,7 @@ pub(crate) enum PreviewMsg {
         /// `(rgba, w, h, rowstride, has_alpha)` on success; `None` with a reason
         /// on failure — a preview must show the failures too, or it lies about
         /// what the run will do.
-        thumb: Option<(Vec<u8>, i32, i32, i32, bool)>,
+        thumb: Option<ThumbBytes>,
         err: Option<String>,
     },
     Done,
@@ -550,6 +711,107 @@ mod batch_tests {
         let s = Scope::published(&m);
         assert!(guard_batch(&s.guard_root, Path::new("/data/music/_discs")).is_err());
         assert!(guard_batch(&s.guard_root, Path::new("/data/discs")).is_ok());
+    }
+
+    fn manifest_scope(root: &Path) -> Scope {
+        let r = root.display();
+        let m: Manifest = serde_json::from_str(&format!(
+            r#"{{"libraryRoot":"{r}","releases":[
+              {{"dir":"{r}/Mr.Oizo/Lambs Anger","artist":"Mr.Oizo","title":"Lambs Anger"}},
+              {{"dir":"{r}/Lifted/Trellis","artist":"Lifted","title":"Trellis"}},
+              {{"dir":"{r}/Nobody/Nothing","artist":"Nobody","title":"Nothing"}}
+            ]}}"#
+        ))
+        .unwrap();
+        Scope::published(&m)
+    }
+
+    #[test]
+    fn the_survey_says_what_would_be_touched_without_rendering_anything() {
+        // Ported from the macOS BatchTests of the same name.
+        let root = tmpdir("survey");
+        for (artist, title, files) in [
+            ("Mr.Oizo", "Lambs Anger", &["cover.jpg", "back.jpg"][..]),
+            ("Lifted", "Trellis", &["cover.jpg"][..]),
+            ("Nobody", "Nothing", &["notes.txt"][..]),
+        ] {
+            let d = root.join(artist).join(title);
+            fs::create_dir_all(&d).unwrap();
+            for f in files {
+                fs::write(d.join(f), b"x").unwrap();
+            }
+        }
+        let scope = manifest_scope(&root);
+
+        let all = survey_batch(&scope, "", 4);
+        assert_eq!(all.total, 3);
+        assert_eq!(all.groups.len(), 2, "the release with only a .txt is not a group");
+        assert_eq!(all.empty_roots, 1, "but it is counted, because 'nothing matched' is news");
+        // Named from the manifest, in name order: a list of records answers
+        // "what will this touch" better than a list of paths.
+        let names: Vec<&str> = all.groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, ["Lifted \u{2014} Trellis", "Mr.Oizo \u{2014} Lambs Anger"]);
+        assert_eq!(all.groups[0].files, ["Lifted/Trellis/cover.jpg"]);
+
+        let covers = survey_batch(&scope, "cover", 4);
+        assert_eq!(covers.total, 2);
+        assert!(covers.groups.iter().all(|g| g.files.iter().all(|f| f.ends_with("cover.jpg"))));
+
+        // The survey and the run must agree, or the count on the button is a lie.
+        assert_eq!(covers.total, find_in_scope(&scope, "cover").0.len());
+        assert_eq!(all.total, find_in_scope(&scope, "").0.len());
+        // And the sample is what a run starts with, in run order.
+        assert_eq!(all.first, find_in_scope(&scope, "").0[..3]);
+    }
+
+    #[test]
+    fn a_folder_scope_is_named_by_its_own_shape_since_no_manifest_names_it() {
+        let root = tmpdir("survey-folder");
+        let d = root.join("Artist/Release");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("cover.png"), b"x").unwrap();
+        let s = survey_batch(&Scope::folder(root.clone()), "", 4);
+        assert_eq!(s.total, 1);
+        assert_eq!(s.groups.len(), 1);
+        assert_eq!(s.groups[0].files, ["Artist/Release/cover.png"]);
+        assert_eq!(s.groups[0].name, "xcolor-batch-survey-folder");
+    }
+
+    #[test]
+    fn a_file_under_two_roots_is_counted_once() {
+        let root = tmpdir("survey-dupes");
+        let inner = root.join("a");
+        fs::create_dir_all(&inner).unwrap();
+        fs::write(inner.join("cover.png"), b"x").unwrap();
+        let scope = Scope {
+            roots: vec![root.clone(), inner],
+            strip: root.clone(),
+            guard_root: root,
+            names: HashMap::new(),
+        };
+        let s = survey_batch(&scope, "", 4);
+        assert_eq!(s.total, 1, "the count must match what a run writes");
+        assert_eq!(s.total, find_in_scope(&scope, "").0.len());
+        assert_eq!(s.empty_roots, 1, "the inner root's only file went to the outer one");
+    }
+
+    #[test]
+    fn an_unreadable_release_is_reported_not_counted_as_empty() {
+        let root = tmpdir("survey-missing");
+        let scope = manifest_scope(&root); // none of the three dirs exist
+        let s = survey_batch(&scope, "", 4);
+        assert_eq!((s.total, s.empty_roots, s.unreadable), (0, 0, 3));
+        assert_eq!(find_in_scope(&scope, "").1.len(), 3, "a run reports them too");
+    }
+
+    #[test]
+    fn a_manifest_without_artist_or_title_still_loads() {
+        let m: Manifest = serde_json::from_str(
+            r#"{"libraryRoot":"/m","releases":[{"dir":"/m/A/B"}]}"#,
+        )
+        .unwrap();
+        let s = Scope::published(&m);
+        assert_eq!(s.name_of(Path::new("/m/A/B")), "A/B");
     }
 
     #[test]

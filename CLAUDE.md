@@ -103,6 +103,26 @@ The macOS sibling has the same shape (`Composition.swift`). That is a shared
 idea, not shared code, and `docs/macos-parity-plan.md` is the plan for
 porting further features across.
 
+## Batch: the count is a promise
+
+- **There is one walk, `walk_scope`** (`batch.rs`). `find_in_scope` (run,
+  dry run, preview) and `survey_batch` (the "37 images in 35 releases" line
+  and "Run (N files)") both read it. Do not walk a scope anywhere else: the
+  number on the Run button is only true because the survey and the run
+  cannot select different files. A test ties the two counts together.
+- **The survey and the sample are driven by a 300 ms ticker, not by signal
+  handlers.** Every input goes into a key (`scope_key`, and the sample key =
+  scope key + `recipe_now()`), and a key that has held for one tick is
+  applied. Adding an input to the recipe means making it part of the key;
+  wiring a `connect_*` handler instead will miss the picked colours, which
+  change in another part of the window and fire nothing here. Stale results
+  are dropped by generation counters, so a slow walk never overwrites a
+  newer one.
+- **`recipe_now` / `scope_now` say why not as a string; `resolve_*` turn
+  that into a dialog.** The ticker uses the silent pair. Never let the
+  ticker show a dialog: it runs every 300 ms.
+- The ticker does nothing while Batch is collapsed or a run is in flight.
+
 ## Traps specific to this repo
 
 - **The root crate is `xcolor`, not `ncover`.** This repo is a fork of the

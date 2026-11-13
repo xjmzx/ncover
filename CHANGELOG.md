@@ -11,6 +11,28 @@ to diverge. Its version numbers are independent of these.
 
 ## [Unreleased]
 
+### Added
+- **Batch says what it will touch before it touches anything.** As soon as
+  there is a scope, a line reads e.g. "37 images in 35 releases · 9 releases
+  matched nothing", with a Files list underneath naming each release from
+  ndisc's manifest ("Artist — Title") and the files it contributes. It
+  follows the name filter as you type. The Run button reads "Run (37
+  files)", from the same walk the run itself does.
+- **Batch samples itself.** The first four outputs render automatically
+  under the controls and re-render when the scope, filter, size, framing,
+  disc or picked colours change, through the same renderer a run writes
+  from. Preview still renders twelve.
+
+### Changed
+- A recipe that cannot work yet (Colour with no colour picked) is now said
+  in place, under the controls, rather than only as a dialog when you press
+  a button.
+- The image column scrolls, so an open Batch section no longer pushes the
+  window past the bottom of the screen.
+- Preview and sample captions show the release folder and the file name on
+  two lines. Across a library every file is `cover.png`, and the old single
+  line cut off the part that told them apart.
+
 ## [0.2.0] — 2026-11-13
 
 ### Added
