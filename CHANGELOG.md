@@ -35,6 +35,10 @@ to diverge. Its version numbers are independent of these.
   halftones and fine type do not break up. WebP and GIF over the cap are
   refused with the reason rather than converted.
 
+- Batch has its own size picker, bound to the canvas size above the image.
+  Batch used to read only that one, which is hidden until an image is open,
+  so with nothing open the size (and Cap's limit) was stuck at 400.
+
 ### Fixed
 - **Two covers in one release overwrote each other.** Every batch output is
   a PNG named after its source, so a release holding both `cover.jpg` and

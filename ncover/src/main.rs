@@ -928,6 +928,24 @@ fn build_batch(
     ));
     row_r.append(&dd_disc);
 
+    // The size, here as well as above the canvas. Batch used to read only the
+    // editor's picker, which is hidden until an image is open, so with nothing
+    // open a cap could not be changed from 400 at all. This is the SAME
+    // setting, not a second copy: the two pickers are bound both ways, so
+    // they cannot disagree. (With an image open, changing it here resizes
+    // that image too, exactly as the editor's picker would.)
+    let batch_sizes: Vec<String> = CANVAS_SIZES.iter().map(|n| format!("{n} px")).collect();
+    let dd_size = gtk::DropDown::from_strings(&batch_sizes.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    dd_size.set_tooltip_text(Some(
+        "Cover / Fit: the side of the square written. Cap: the longest side allowed; anything larger is shrunk to it.\n\nThe same setting as the canvas size above the image.",
+    ));
+    size_dd
+        .bind_property("selected", &dd_size, "selected")
+        .bidirectional()
+        .sync_create()
+        .build();
+    row_r.append(&dd_size);
+
     let size_note = Label::new(None);
     size_note.add_css_class("dim-label");
     size_note.set_hexpand(true);
