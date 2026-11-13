@@ -1251,16 +1251,25 @@ fn build_batch(
                 }
                 let _ = tx.send_blocking(BatchMsg::Total(files.len()));
 
+                // Destinations are planned for the whole set before anything
+                // is written, so two sources can never share an output name.
+                let rels: Vec<PathBuf> = files
+                    .iter()
+                    .map(|f| f.strip_prefix(&strip).unwrap_or(f).to_path_buf())
+                    .collect();
+                let dests = plan_dests(&rels, recipe.disc.is_some());
+
                 let (mut ok, mut failed) = (0usize, 0usize);
                 let mut stopped = false;
-                for f in files {
+                for ((f, rel), dest) in files.iter().zip(rels).zip(dests) {
                     if worker_stop.load(Ordering::Relaxed) {
                         stopped = true;
                         break;
                     }
-                    let rel = f.strip_prefix(&strip).unwrap_or(&f).to_path_buf();
-                    let result = batch_one(&f, &rel, &o_root, recipe, dry)
-                        .map_err(|e| format!("{e:#}")); // {:#} = the whole context chain
+                    let result = dest.and_then(|d| {
+                        batch_one(f, &o_root.join(d), recipe, dry)
+                            .map_err(|e| format!("{e:#}")) // {:#} = the whole context chain
+                    });
                     match &result {
                         Ok(_) => ok += 1,
                         Err(_) => failed += 1,
@@ -1737,6 +1746,12 @@ fn show_survey(s: &Survey, what: &str, needle: &str, lbl: &Label, list: &ListBox
         }
         if s.unreadable > 0 {
             t += &format!(" · {} could not be read", plural(s.unreadable, what));
+        }
+        if s.shared_names > 0 {
+            t += &format!(
+                " · {} with two images of one name (e.g. cover.jpg + cover.png): both kept, the extension goes into the output name",
+                plural(s.shared_names, what)
+            );
         }
         lbl.set_text(&t);
     }

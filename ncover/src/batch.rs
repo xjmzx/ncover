@@ -263,6 +263,9 @@ pub(crate) struct Survey {
     pub(crate) empty_roots: usize,
     /// Roots that could not be read at all.
     pub(crate) unreadable: usize,
+    /// Output names two sources would share (`cover.jpg` + `cover.png`).
+    /// The run keeps them apart by extension; the survey says so up front.
+    pub(crate) shared_names: usize,
     /// The first files in RUN order, for the automatic sample — so the sample
     /// is literally what a run starts with.
     pub(crate) first: Vec<PathBuf>,
@@ -272,6 +275,10 @@ pub(crate) fn survey_batch(scope: &Scope, needle: &str, first_n: usize) -> Surve
     let (hits, errors) = walk_scope(scope, needle);
     let mut by_root: Vec<Vec<String>> = vec![Vec::new(); scope.roots.len()];
     let mut all: Vec<&PathBuf> = Vec::with_capacity(hits.len());
+    let rels: Vec<PathBuf> = hits
+        .iter()
+        .map(|(_, f)| f.strip_prefix(&scope.strip).unwrap_or(f).to_path_buf())
+        .collect();
     for (i, f) in &hits {
         by_root[*i].push(f.strip_prefix(&scope.strip).unwrap_or(f).display().to_string());
         all.push(f);
@@ -298,6 +305,7 @@ pub(crate) fn survey_batch(scope: &Scope, needle: &str, first_n: usize) -> Surve
         groups,
         empty_roots,
         unreadable,
+        shared_names: shared_names(&rels),
         first: all.into_iter().take(first_n).cloned().collect(),
     }
 }
@@ -393,11 +401,76 @@ pub(crate) fn batch_render(src: &Path, r: Recipe) -> Result<gdk_pixbuf::Pixbuf> 
     }
 }
 
-/// One file, start to finish. `dry` renders (so it still fails on a file that
-/// would really fail) but does everything except write.
-pub(crate) fn batch_one(src: &Path, rel: &Path, out_root: &Path, r: Recipe, dry: bool) -> Result<PathBuf> {
+/// Every output path for a run, relative to the output root, in the order of
+/// `rels`.
+///
+/// `batch_dest` is the plain answer for one file, and it is not enough for a
+/// set: every output is `.png`, so `cover.jpg` and `cover.png` in one release
+/// both become `cover.png`, and the second write silently replaces the
+/// first. The dry run cannot catch that by rendering, since each file renders
+/// fine on its own. So destinations are planned for the WHOLE set, and
+/// sources that would share a name keep their extension in it:
+/// `cover-jpg.png` and `cover-png.png`. Files that do not clash keep the
+/// plain name, so a library with one cover per release comes out exactly as
+/// before.
+///
+/// An `Err` is a file that would still overwrite an earlier one after that
+/// (only possible if the library already holds a file literally named like
+/// `cover-jpg.png` beside the pair). It is refused with the reason rather
+/// than written over.
+pub(crate) fn plan_dests(rels: &[PathBuf], disc: bool) -> Vec<std::result::Result<PathBuf, String>> {
+    let suffix = if disc { "-disc" } else { "" };
+    let plain: Vec<PathBuf> = rels.iter().map(|r| batch_dest(r, Path::new(""), disc)).collect();
+    let mut uses: HashMap<&PathBuf, usize> = HashMap::new();
+    for p in &plain {
+        *uses.entry(p).or_default() += 1;
+    }
+    let mut taken: HashMap<PathBuf, &PathBuf> = HashMap::new();
+    rels.iter()
+        .zip(&plain)
+        .map(|(rel, p)| {
+            let dest = if uses[p] > 1 {
+                let stem = rel.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
+                let ext = rel
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                p.with_file_name(format!("{stem}-{ext}{suffix}.png"))
+            } else {
+                p.clone()
+            };
+            match taken.get(&dest) {
+                Some(first) => Err(format!(
+                    "would overwrite the output of {} ({}); not written",
+                    first.display(),
+                    dest.display()
+                )),
+                None => {
+                    taken.insert(dest.clone(), rel);
+                    Ok(dest)
+                }
+            }
+        })
+        .collect()
+}
+
+/// How many plain output names are shared by more than one source: the
+/// releases (or folders) `plan_dests` will keep apart by extension.
+pub(crate) fn shared_names(rels: &[PathBuf]) -> usize {
+    let mut uses: HashMap<PathBuf, usize> = HashMap::new();
+    for r in rels {
+        *uses.entry(batch_dest(r, Path::new(""), false)).or_default() += 1;
+    }
+    uses.values().filter(|&&n| n > 1).count()
+}
+
+/// One file, start to finish, to a destination `plan_dests` chose. `dry`
+/// renders (so it still fails on a file that would really fail) but does
+/// everything except write.
+pub(crate) fn batch_one(src: &Path, dest: &Path, r: Recipe, dry: bool) -> Result<PathBuf> {
     let final_pb = batch_render(src, r)?;
-    let dest = batch_dest(rel, out_root, r.disc.is_some());
+    let dest = dest.to_path_buf();
     if dry {
         return Ok(dest);
     }
@@ -518,6 +591,87 @@ mod batch_tests {
     }
 
     #[test]
+    fn two_covers_in_one_release_do_not_land_on_one_file() {
+        // The real case: 14 releases in the published catalogue hold both a
+        // cover.jpg and a cover.png (or .jpeg + .jpg). Every output is PNG, so
+        // both became cover.png and the second write replaced the first.
+        let rels: Vec<PathBuf> = [
+            "2562/Aerial/cover.jpg",
+            "2562/Aerial/cover.png",
+            "Cylob/Formant Potaton/cover.jpeg",
+            "Cylob/Formant Potaton/cover.jpg",
+            "Autechre/Amber/cover.jpg",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        let got: Vec<PathBuf> = plan_dests(&rels, false).into_iter().map(|d| d.unwrap()).collect();
+        assert_eq!(
+            got,
+            [
+                "2562/Aerial/cover-jpg.png",
+                "2562/Aerial/cover-png.png",
+                "Cylob/Formant Potaton/cover-jpeg.png",
+                "Cylob/Formant Potaton/cover-jpg.png",
+                // No clash: the plain name, exactly as before.
+                "Autechre/Amber/cover.png",
+            ]
+            .map(PathBuf::from)
+        );
+        let disc: Vec<PathBuf> = plan_dests(&rels[..2], true).into_iter().map(|d| d.unwrap()).collect();
+        assert_eq!(disc, ["2562/Aerial/cover-jpg-disc.png", "2562/Aerial/cover-png-disc.png"].map(PathBuf::from));
+        assert_eq!(shared_names(&rels), 2);
+    }
+
+    #[test]
+    fn a_name_that_still_clashes_is_refused_not_overwritten() {
+        // cover.jpg + cover.png become cover-jpg.png / cover-png.png, and the
+        // folder also holds a real cover-jpg.png. The third must not win.
+        let rels: Vec<PathBuf> = ["A/cover.jpg", "A/cover.png", "A/cover-jpg.png"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let got = plan_dests(&rels, false);
+        assert_eq!(got[0].as_deref().unwrap(), Path::new("A/cover-jpg.png"));
+        assert_eq!(got[1].as_deref().unwrap(), Path::new("A/cover-png.png"));
+        assert!(got[2].as_ref().unwrap_err().contains("would overwrite"), "{:?}", got[2]);
+    }
+
+    #[test]
+    #[ignore] // reads the real published.json and /data/music; run explicitly
+    fn the_real_catalogue_plans_one_output_per_cover() {
+        let m = load_manifest(&published_manifest_path().expect("no manifest")).unwrap();
+        let scope = Scope::published(&m);
+        let (files, _) = find_in_scope(&scope, "cover");
+        let rels: Vec<PathBuf> = files
+            .iter()
+            .map(|f| f.strip_prefix(&scope.strip).unwrap().to_path_buf())
+            .collect();
+        let plan = plan_dests(&rels, false);
+        let dests: std::collections::HashSet<_> = plan.iter().map(|d| d.clone().unwrap()).collect();
+        assert_eq!(dests.len(), files.len(), "every cover gets its own output");
+        println!("{} files, {} shared names", files.len(), shared_names(&rels));
+        for (r, d) in rels.iter().zip(&plan) {
+            let d = d.as_ref().unwrap();
+            if d.file_name() != batch_dest(r, Path::new(""), false).file_name() {
+                println!("{}  ->  {}", r.display(), d.file_name().unwrap().to_string_lossy());
+            }
+        }
+    }
+
+    #[test]
+    fn the_survey_counts_shared_names() {
+        let root = tmpdir("survey-shared");
+        let d = root.join("A/B");
+        fs::create_dir_all(&d).unwrap();
+        for f in ["cover.jpg", "cover.png", "back.png"] {
+            fs::write(d.join(f), b"x").unwrap();
+        }
+        let s = survey_batch(&Scope::folder(root), "", 4);
+        assert_eq!((s.total, s.shared_names), (3, 1));
+    }
+
+    #[test]
     fn the_destination_mirrors_the_source_tree() {
         // The shape of the library is the only thing that tells 1,600 files named
         // cover.png apart. Flatten it and they all land on each other.
@@ -598,7 +752,7 @@ mod batch_tests {
             disc: Some(OuterFill::Alpha),
         };
         let rel = Path::new("A/B/cover.png");
-        let dest = batch_one(&src.join(rel), rel, &out, r, false).unwrap();
+        let dest = batch_one(&src.join(rel), &out.join(batch_dest(rel, Path::new(""), true)), r, false).unwrap();
         assert_eq!(dest, out.join("A/B/cover-disc.png"));
         let got = gdk_pixbuf::Pixbuf::from_file(&dest).unwrap();
         assert_eq!((got.width(), got.height()), (200, 200));
@@ -824,7 +978,7 @@ mod batch_tests {
         let r = Recipe { canvas: 400, framing: Framing::Fit, disc: None };
         let rel = Path::new("cover.png");
 
-        let dest = batch_one(&src.join(rel), rel, &out, r, true).unwrap();
+        let dest = batch_one(&src.join(rel), &batch_dest(rel, &out, false), r, true).unwrap();
         assert_eq!(dest, out.join("cover.png"));
         assert!(!dest.exists(), "a dry run writes nothing");
 
@@ -832,6 +986,6 @@ mod batch_tests {
         // what makes it worth running.
         fs::write(src.join("broken-cover.png"), b"not a png").unwrap();
         let bad = Path::new("broken-cover.png");
-        assert!(batch_one(&src.join(bad), bad, &out, r, true).is_err());
+        assert!(batch_one(&src.join(bad), &batch_dest(bad, &out, false), r, true).is_err());
     }
 }

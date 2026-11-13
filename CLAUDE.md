@@ -122,6 +122,12 @@ porting further features across.
   that into a dialog.** The ticker uses the silent pair. Never let the
   ticker show a dialog: it runs every 300 ms.
 - The ticker does nothing while Batch is collapsed or a run is in flight.
+- **Output names are planned for the whole run (`plan_dests`), never per
+  file.** Every output is `.png`, so `batch_dest` alone maps `cover.jpg`
+  and `cover.png` in one release to the same file, and the second write
+  silently replaces the first. The dry run cannot catch that by rendering.
+  `batch_one` takes the destination it is given; do not reintroduce a code
+  path that derives it from the source alone.
 
 ## Traps specific to this repo
 

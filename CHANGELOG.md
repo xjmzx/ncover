@@ -23,6 +23,17 @@ to diverge. Its version numbers are independent of these.
   disc or picked colours change, through the same renderer a run writes
   from. Preview still renders twelve.
 
+### Fixed
+- **Two covers in one release overwrote each other.** Every batch output is
+  a PNG named after its source, so a release holding both `cover.jpg` and
+  `cover.png` wrote two files to one `cover.png`, and the second replaced
+  the first. A dry run could not show it, since each file renders fine on
+  its own. Output names are now planned for the whole run: sources that
+  would share a name keep their extension in it (`cover-jpg.png`,
+  `cover-png.png`), and everything else keeps the plain name it always had.
+  The survey line says when this happens. 14 releases in the published
+  catalogue were affected. Present since batch was added.
+
 ### Changed
 - A recipe that cannot work yet (Colour with no colour picked) is now said
   in place, under the controls, rather than only as a dialog when you press
