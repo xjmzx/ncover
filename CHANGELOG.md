@@ -11,6 +11,8 @@ to diverge. Its version numbers are independent of these.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-11-13
+
 ### Added
 - **Batch says what it will touch before it touches anything.** As soon as
   there is a scope, a line reads e.g. "37 images in 35 releases · 9 releases
@@ -121,7 +123,8 @@ became installable from a release rather than only from source.
   a Preview contact sheet and a dry run. It never writes over the source.
 - Save as PNG, or overwrite the original PNG in place.
 
-[Unreleased]: https://github.com/xjmzx/ncover/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/xjmzx/ncover/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/xjmzx/ncover/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/xjmzx/ncover/releases/tag/v0.2.0
 [0.1.1]: https://github.com/xjmzx/ncover/releases/tag/v0.1.1
 [0.1.0]: https://github.com/xjmzx/ncover/releases/tag/v0.1.0
