@@ -129,6 +129,21 @@ porting further features across.
   `batch_one` takes the destination it is given; do not reintroduce a code
   path that derives it from the source alone.
 
+- **Cap is not a framing onto a square, and it must not write what it does
+  not change.** `Framing::Cap` returns `Ok(None)` from `batch_one` for a file
+  within the cap, and keeps the source's name, extension and format
+  (`plan_for`, `cap_format`). Its count (`cap_survey`) and the run decide
+  "within the cap" from the same `image_dims` header read and `cap_size`, and
+  an ignored test checks that against the real catalogue. Keep it that way, or
+  "Run (245 of 2377 to shrink)" stops being true.
+- **`image_dims` parses PNG and JPEG headers by hand on purpose.**
+  gdk-pixbuf's `file_info` reads far into a JPEG: 14 s for 2,400 covers
+  against 0.1 s here. It falls back to `file_info` for anything else.
+- **Shrinking uses `area_resample`, not `compose`.** `compose` samples the
+  nearest pixel, which is right for a colour tool's enlargements and wrong for
+  shrinking. Phase 2 of the parity plan moves `compose` onto it when shrinking;
+  until then, Cover / Fit downscales are still nearest-pixel.
+
 ## Traps specific to this repo
 
 - **The root crate is `xcolor`, not `ncover`.** This repo is a fork of the

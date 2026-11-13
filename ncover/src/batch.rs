@@ -23,10 +23,18 @@ pub(crate) const RESULT_ROWS: usize = 300;
 pub(crate) enum Framing {
     Cover,
     Fit,
+    /// Not a framing onto a square: shrink anything whose longer side is over
+    /// `Recipe::canvas` down to it, keep the aspect, keep the file's format,
+    /// and leave everything already within the cap alone (not written at
+    /// all). This is the tool for tidying a library's covers, where the other
+    /// two would crop or pad every non-square cover, enlarge every small one
+    /// and turn 66 KB JPEGs into 420 KB PNGs.
+    Cap,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Recipe {
+    /// The square's side for Cover / Fit; the longest side allowed for Cap.
     pub(crate) canvas: i32,
     pub(crate) framing: Framing,
     /// `None` = no disc: just the framed square. The disc is an option, not the
@@ -269,6 +277,9 @@ pub(crate) struct Survey {
     /// The first files in RUN order, for the automatic sample — so the sample
     /// is literally what a run starts with.
     pub(crate) first: Vec<PathBuf>,
+    /// Every file in run order. Cap reads their headers to say how many it
+    /// would actually change.
+    pub(crate) files: Vec<PathBuf>,
 }
 
 pub(crate) fn survey_batch(scope: &Scope, needle: &str, first_n: usize) -> Survey {
@@ -306,7 +317,8 @@ pub(crate) fn survey_batch(scope: &Scope, needle: &str, first_n: usize) -> Surve
         empty_roots,
         unreadable,
         shared_names: shared_names(&rels),
-        first: all.into_iter().take(first_n).cloned().collect(),
+        first: all.iter().take(first_n).map(|p| (*p).clone()).collect(),
+        files: all.into_iter().cloned().collect(),
     }
 }
 
@@ -393,6 +405,16 @@ pub(crate) fn batch_render(src: &Path, r: Recipe) -> Result<gdk_pixbuf::Pixbuf> 
     let place = match r.framing {
         Framing::Cover => Placement::cover(w, h, r.canvas),
         Framing::Fit => Placement::fit(w, h, r.canvas),
+        Framing::Cap => {
+            // The pixels as a viewer shows them: a phone photo stored
+            // sideways with an EXIF turn would otherwise come out sideways,
+            // because the re-encoded file no longer carries the tag.
+            let pb = pb.apply_embedded_orientation().unwrap_or(pb);
+            return match cap_size(pb.width(), pb.height(), r.canvas) {
+                Some((nw, nh)) => area_resample(&pb, nw, nh),
+                None => Ok(pb),
+            };
+        }
     };
     let framed = compose(&pb, place, r.canvas)?;
     match r.disc {
@@ -455,6 +477,91 @@ pub(crate) fn plan_dests(rels: &[PathBuf], disc: bool) -> Vec<std::result::Resul
         .collect()
 }
 
+/// An image's pixel size from its header. PNG and JPEG are parsed directly:
+/// gdk-pixbuf's `file_info` reads far more of a JPEG than the header (about
+/// 6 ms a file, 14 s for a 2,400-cover library), which is too slow to keep a
+/// survey current. Anything else falls back to `file_info`.
+pub(crate) fn image_dims(path: &Path) -> Option<(i32, i32)> {
+    use std::io::Read;
+    let mut f = fs::File::open(path).ok()?;
+    let mut head = [0u8; 24];
+    f.read_exact(&mut head).ok()?;
+    if head.starts_with(b"\x89PNG\r\n\x1a\n") && &head[12..16] == b"IHDR" {
+        let w = u32::from_be_bytes(head[16..20].try_into().ok()?);
+        let h = u32::from_be_bytes(head[20..24].try_into().ok()?);
+        return Some((w as i32, h as i32));
+    }
+    if head.starts_with(&[0xFF, 0xD8]) {
+        // Walk the marker segments to the first start-of-frame. Usually in
+        // the first few KB; give up after 1 MB rather than read a whole file.
+        let mut buf = head.to_vec();
+        f.take(1 << 20).read_to_end(&mut buf).ok()?;
+        let mut i = 2;
+        while i + 9 < buf.len() {
+            if buf[i] != 0xFF {
+                i += 1;
+                continue;
+            }
+            let m = buf[i + 1];
+            if m == 0xFF {
+                i += 1; // fill byte
+                continue;
+            }
+            if m == 0xD8 || m == 0x01 || (0xD0..=0xD7).contains(&m) {
+                i += 2; // markers without a length
+                continue;
+            }
+            let len = u16::from_be_bytes([buf[i + 2], buf[i + 3]]) as usize;
+            // SOF0–SOF15, except DHT (C4), JPG (C8) and DAC (CC).
+            if (0xC0..=0xCF).contains(&m) && m != 0xC4 && m != 0xC8 && m != 0xCC {
+                let h = u16::from_be_bytes([buf[i + 5], buf[i + 6]]);
+                let w = u16::from_be_bytes([buf[i + 7], buf[i + 8]]);
+                return Some((w as i32, h as i32));
+            }
+            i += 2 + len;
+        }
+        return None;
+    }
+    gdk_pixbuf::Pixbuf::file_info(path).map(|(_, w, h)| (w, h))
+}
+
+/// Which files Cap would actually change, read from headers only (nothing is
+/// decoded, so this is fast enough to keep current). A file whose header
+/// cannot be read counts as "would change": the run will open it properly,
+/// and either shrink it or fail it with the reason. Returns the count and the
+/// first `first_n` such files in run order, for the sample.
+pub(crate) fn cap_survey(files: &[PathBuf], cap: i32, first_n: usize) -> (usize, Vec<PathBuf>) {
+    let mut over = 0;
+    let mut first = Vec::new();
+    for f in files {
+        if is_svg(f) {
+            continue;
+        }
+        let changes = match image_dims(f) {
+            Some((w, h)) => cap_size(w, h, cap).is_some(),
+            None => true,
+        };
+        if changes {
+            over += 1;
+            if first.len() < first_n {
+                first.push(f.clone());
+            }
+        }
+    }
+    (over, first)
+}
+
+/// Output paths for a run under recipe `r`. Cap keeps every file's own name
+/// and extension (it writes the same format back), so sources are already
+/// distinct; the other framings write PNG and go through `plan_dests`.
+pub(crate) fn plan_for(rels: &[PathBuf], r: Recipe) -> Vec<std::result::Result<PathBuf, String>> {
+    if r.framing == Framing::Cap {
+        rels.iter().map(|p| Ok(p.clone())).collect()
+    } else {
+        plan_dests(rels, r.disc.is_some())
+    }
+}
+
 /// How many plain output names are shared by more than one source: the
 /// releases (or folders) `plan_dests` will keep apart by extension.
 pub(crate) fn shared_names(rels: &[PathBuf]) -> usize {
@@ -468,20 +575,166 @@ pub(crate) fn shared_names(rels: &[PathBuf]) -> usize {
 /// One file, start to finish, to a destination `plan_dests` chose. `dry`
 /// renders (so it still fails on a file that would really fail) but does
 /// everything except write.
-pub(crate) fn batch_one(src: &Path, dest: &Path, r: Recipe, dry: bool) -> Result<PathBuf> {
-    let final_pb = batch_render(src, r)?;
+///
+/// `Ok(None)` means "left alone": only Cap does that, for a file already
+/// within the cap (or a vector, which has no pixel size to cap).
+pub(crate) fn batch_one(src: &Path, dest: &Path, r: Recipe, dry: bool) -> Result<Option<PathBuf>> {
     let dest = dest.to_path_buf();
+    let format = if r.framing == Framing::Cap {
+        if is_svg(src) {
+            return Ok(None);
+        }
+        // The header is enough to know a file is within the cap, so the
+        // ~90% of a library that needs nothing is never decoded.
+        if let Some((w, h)) = image_dims(src) {
+            if cap_size(w, h, r.canvas).is_none() {
+                return Ok(None);
+            }
+        }
+        cap_format(src)?
+    } else {
+        ("png", Vec::new())
+    };
+    let final_pb = batch_render(src, r)?;
     if dry {
-        return Ok(dest);
+        return Ok(Some(dest));
     }
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("could not create {}", parent.display()))?;
     }
+    let opts: Vec<(&str, &str)> = format.1.iter().map(|(k, v)| (*k, *v)).collect();
     final_pb
-        .savev(&dest, "png", &[])
+        .savev(&dest, format.0, &opts)
         .with_context(|| format!("could not write {}", dest.display()))?;
-    Ok(dest)
+    Ok(Some(dest))
+}
+
+fn is_svg(p: &Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
+}
+
+/// The size a file shrinks to under `cap`, or `None` if it is already within
+/// it. Aspect is kept; the longer side becomes exactly `cap`.
+pub(crate) fn cap_size(w: i32, h: i32, cap: i32) -> Option<(i32, i32)> {
+    let long = w.max(h);
+    if long <= cap || w <= 0 || h <= 0 {
+        return None;
+    }
+    let s = cap as f64 / long as f64;
+    Some((((w as f64 * s).round() as i32).max(1), ((h as f64 * s).round() as i32).max(1)))
+}
+
+/// JPEG stays JPEG and PNG stays PNG: Cap tidies a file, it does not change
+/// what kind of file it is. Quality 92 because the image is being made
+/// smaller, which hides re-encoding loss, and a photo cover has no alpha to
+/// need PNG for. Anything else (WebP, GIF) is refused with the reason, not
+/// silently converted.
+fn cap_format(src: &Path) -> Result<(&'static str, Vec<(&'static str, &'static str)>)> {
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => Ok(("jpeg", vec![("quality", "92")])),
+        "png" => Ok(("png", Vec::new())),
+        _ => Err(anyhow::anyhow!(format!(
+            "Cap keeps the file's format and cannot write .{ext}; left as it is"
+        ))),
+    }
+}
+
+/// Resize by AREA AVERAGING, for shrinking: each output pixel is the
+/// coverage-weighted mean of the source pixels under it. The nearest-pixel
+/// sampling `compose` uses is right for a colour tool's enlargements (it
+/// invents no colours) but wrong for shrinking, where it throws most pixels
+/// away and keeps whichever happen to land on the grid, so fine detail and
+/// type shimmer. Averaging is done on PREMULTIPLIED values, or a transparent
+/// pixel's colour bleeds into its opaque neighbours as a dark fringe.
+pub(crate) fn area_resample(src: &gdk_pixbuf::Pixbuf, nw: i32, nh: i32) -> Result<gdk_pixbuf::Pixbuf> {
+    let (w, h) = (src.width() as usize, src.height() as usize);
+    let (nw_u, nh_u) = (nw as usize, nh as usize);
+    let n = src.n_channels() as usize;
+    let rs = src.rowstride() as usize;
+    let alpha = src.has_alpha();
+    let px = unsafe { src.pixels() };
+
+    // For each output index, the source indices it covers and by how much.
+    fn spans(from: usize, to: usize) -> Vec<Vec<(usize, f32)>> {
+        let k = from as f64 / to as f64;
+        (0..to)
+            .map(|o| {
+                let (a, b) = (o as f64 * k, (o + 1) as f64 * k);
+                let mut v = Vec::new();
+                let mut i = a.floor() as usize;
+                while (i as f64) < b && i < from {
+                    let cover = (b.min(i as f64 + 1.0) - a.max(i as f64)) as f32;
+                    if cover > 0.0 {
+                        v.push((i, cover));
+                    }
+                    i += 1;
+                }
+                v
+            })
+            .collect()
+    }
+    let xs = spans(w, nw_u);
+    let ys = spans(h, nh_u);
+
+    // Pass 1: rows, source width → output width, premultiplied f32 RGBA.
+    let mut mid = vec![0f32; h * nw_u * 4];
+    for y in 0..h {
+        let row = &px[y * rs..];
+        for (ox, span) in xs.iter().enumerate() {
+            let mut acc = [0f32; 4];
+            let mut wsum = 0f32;
+            for &(sx, c) in span {
+                let p = &row[sx * n..sx * n + n];
+                let a = if alpha { p[3] as f32 / 255.0 } else { 1.0 };
+                acc[0] += p[0] as f32 * a * c;
+                acc[1] += p[1] as f32 * a * c;
+                acc[2] += p[2] as f32 * a * c;
+                acc[3] += a * c;
+                wsum += c;
+            }
+            let o = (y * nw_u + ox) * 4;
+            for k in 0..4 {
+                mid[o + k] = acc[k] / wsum;
+            }
+        }
+    }
+    // Pass 2: columns, then un-premultiply into the output.
+    let out = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, alpha, 8, nw, nh)
+        .context("could not allocate the resized image")?;
+    let ors = out.rowstride() as usize;
+    let on = out.n_channels() as usize;
+    let opx = unsafe { out.pixels() };
+    for (oy, span) in ys.iter().enumerate() {
+        for ox in 0..nw_u {
+            let mut acc = [0f32; 4];
+            let mut wsum = 0f32;
+            for &(sy, c) in span {
+                let m = &mid[(sy * nw_u + ox) * 4..];
+                for k in 0..4 {
+                    acc[k] += m[k] * c;
+                }
+                wsum += c;
+            }
+            let a = acc[3] / wsum;
+            let o = oy * ors + ox * on;
+            for k in 0..3 {
+                let v = if a > 0.0 { acc[k] / wsum / a } else { 0.0 };
+                opx[o + k] = v.round().clamp(0.0, 255.0) as u8;
+            }
+            if alpha {
+                opx[o + 3] = (a * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Progress from the worker thread. Deliberately carries the REASON on failure:
@@ -491,10 +744,13 @@ pub(crate) enum BatchMsg {
     Total(usize),
     One {
         rel: String,
-        result: std::result::Result<PathBuf, String>,
+        /// `Ok(None)`: left alone (Cap, already within it).
+        result: std::result::Result<Option<PathBuf>, String>,
     },
     Done {
         ok: usize,
+        /// Left alone because they were already within the cap.
+        left: usize,
         failed: usize,
         stopped: bool,
     },
@@ -523,8 +779,15 @@ pub(crate) type ThumbBytes = (Vec<u8>, i32, i32, i32, bool);
 /// Render one file through the recipe and shrink it to a `px` thumbnail —
 /// through `batch_render`, the same function a run writes from.
 pub(crate) fn render_thumb(src: &Path, r: Recipe, px: i32) -> Result<ThumbBytes> {
-    let t = batch_render(src, r)?
-        .scale_simple(px, px, gdk_pixbuf::InterpType::Bilinear)
+    let full = batch_render(src, r)?;
+    // Fit, not stretch: a Cap output keeps its own shape.
+    let k = px as f64 / full.width().max(full.height()) as f64;
+    let (tw, th) = (
+        ((full.width() as f64 * k).round() as i32).max(1),
+        ((full.height() as f64 * k).round() as i32).max(1),
+    );
+    let t = full
+        .scale_simple(tw, th, gdk_pixbuf::InterpType::Bilinear)
         .context("could not scale the thumbnail")?;
     Ok((unsafe { t.pixels() }.to_vec(), t.width(), t.height(), t.rowstride(), t.has_alpha()))
 }
@@ -588,6 +851,126 @@ mod batch_tests {
         fs::create_dir_all(&src).unwrap();
         fs::create_dir_all(&out).unwrap();
         assert!(guard_batch(&src, &out).is_ok());
+    }
+
+    fn solid(w: i32, h: i32, alpha: bool, rgba: u32) -> gdk_pixbuf::Pixbuf {
+        let pb = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, alpha, 8, w, h).unwrap();
+        pb.fill(rgba);
+        pb
+    }
+    fn set(pb: &gdk_pixbuf::Pixbuf, x: i32, y: i32, v: [u8; 4]) {
+        let n = pb.n_channels() as usize;
+        let i = y as usize * pb.rowstride() as usize + x as usize * n;
+        let b = unsafe { pb.pixels() };
+        b[i..i + n].copy_from_slice(&v[..n]);
+    }
+
+    #[test]
+    fn the_cap_survey_counts_what_a_cap_run_would_write() {
+        let base = tmpdir("cap-survey");
+        solid(1000, 1000, false, 0xffffffff).savev(base.join("a.jpg"), "jpeg", &[]).unwrap();
+        solid(600, 600, false, 0xffffffff).savev(base.join("b.jpg"), "jpeg", &[]).unwrap();
+        solid(900, 300, false, 0xffffffff).savev(base.join("c.png"), "png", &[]).unwrap();
+        let files: Vec<PathBuf> = ["a.jpg", "b.jpg", "c.png"].iter().map(|f| base.join(f)).collect();
+        let (over, first) = cap_survey(&files, 800, 4);
+        assert_eq!(over, 2);
+        assert_eq!(first, [base.join("a.jpg"), base.join("c.png")]);
+        // And it agrees with what the run does, file by file.
+        let r = Recipe { canvas: 800, framing: Framing::Cap, disc: None };
+        let written = files
+            .iter()
+            .filter(|f| batch_one(f, &base.join("out").join(f.file_name().unwrap()), r, true).unwrap().is_some())
+            .count();
+        assert_eq!(written, over);
+    }
+
+    #[test]
+    fn header_sizes_match_what_gdk_pixbuf_decodes() {
+        let base = tmpdir("dims");
+        solid(123, 45, false, 0x112233ff).savev(base.join("a.jpg"), "jpeg", &[]).unwrap();
+        solid(67, 890, true, 0x11223380).savev(base.join("b.png"), "png", &[]).unwrap();
+        solid(31, 31, false, 0x112233ff).savev(base.join("c.jpg"), "jpeg", &[("quality", "50")]).unwrap();
+        assert_eq!(image_dims(&base.join("a.jpg")), Some((123, 45)));
+        assert_eq!(image_dims(&base.join("b.png")), Some((67, 890)));
+        assert_eq!(image_dims(&base.join("c.jpg")), Some((31, 31)));
+        fs::write(base.join("d.png"), b"not a png").unwrap();
+        assert_eq!(image_dims(&base.join("d.png")), None);
+    }
+
+    #[test]
+    fn cap_shrinks_only_what_is_over_and_keeps_the_shape() {
+        assert_eq!(cap_size(600, 600, 800), None, "within the cap: left alone");
+        assert_eq!(cap_size(800, 800, 800), None, "exactly the cap is within it");
+        assert_eq!(cap_size(1000, 1000, 800), Some((800, 800)));
+        assert_eq!(cap_size(1600, 800, 800), Some((800, 400)), "aspect kept, no crop");
+        assert_eq!(cap_size(599, 1200, 600), Some((300, 600)));
+    }
+
+    #[test]
+    fn area_averaging_keeps_every_source_pixel_in_the_mix() {
+        // A 1-px black/white checker shrunk 2:1 is mid grey everywhere.
+        // Nearest-pixel sampling would return all black or all white.
+        let pb = solid(4, 4, false, 0x000000ff);
+        for y in 0..4 {
+            for x in 0..4 {
+                if (x + y) % 2 == 1 {
+                    set(&pb, x, y, [255, 255, 255, 255]);
+                }
+            }
+        }
+        let out = area_resample(&pb, 2, 2).unwrap();
+        for (x, y) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let (r, g, b, _) = px(&out, x, y);
+            assert!((127..=128).contains(&r) && r == g && g == b, "{x},{y}: {r}");
+        }
+    }
+
+    #[test]
+    fn area_averaging_weights_partial_pixels_by_coverage() {
+        // 3 → 2: output 0 covers src 0 fully and half of src 1; output 1
+        // covers the other half of src 1 and all of src 2.
+        let pb = solid(3, 1, false, 0x000000ff);
+        set(&pb, 2, 0, [255, 255, 255, 255]);
+        let out = area_resample(&pb, 2, 1).unwrap();
+        assert_eq!(px(&out, 0, 0).0, 0);
+        assert_eq!(px(&out, 1, 0).0, 170, "(0·0.5 + 255·1) / 1.5");
+    }
+
+    #[test]
+    fn area_averaging_is_premultiplied_so_edges_do_not_darken() {
+        // Opaque red beside fully transparent black. Straight averaging
+        // gives dark red at half alpha; premultiplied gives red at half alpha.
+        let pb = solid(2, 1, true, 0x00000000);
+        set(&pb, 0, 0, [255, 0, 0, 255]);
+        let out = area_resample(&pb, 1, 1).unwrap();
+        assert_eq!(px(&out, 0, 0), (255, 0, 0, 128));
+    }
+
+    #[test]
+    fn cap_leaves_small_files_unwritten_and_keeps_the_format() {
+        let base = tmpdir("cap");
+        let (src, out) = (base.join("in"), base.join("out"));
+        fs::create_dir_all(&src).unwrap();
+        solid(1200, 600, false, 0x3366ffff).savev(src.join("big.jpg"), "jpeg", &[]).unwrap();
+        solid(500, 500, false, 0x3366ffff).savev(src.join("small.jpg"), "jpeg", &[]).unwrap();
+        solid(900, 900, true, 0x3366ff80).savev(src.join("alpha.png"), "png", &[]).unwrap();
+        let r = Recipe { canvas: 800, framing: Framing::Cap, disc: None };
+
+        let rels: Vec<PathBuf> = ["big.jpg", "small.jpg", "alpha.png"].map(PathBuf::from).to_vec();
+        let plan = plan_for(&rels, r);
+        let dest = |i: usize| out.join(plan[i].as_ref().unwrap());
+        assert_eq!(plan[0].as_deref().unwrap(), Path::new("big.jpg"), "Cap keeps the name and extension");
+
+        assert!(batch_one(&src.join("small.jpg"), &dest(1), r, false).unwrap().is_none());
+        assert!(!dest(1).exists(), "within the cap: not written at all");
+
+        let d = batch_one(&src.join("big.jpg"), &dest(0), r, false).unwrap().unwrap();
+        let (fmt, w, h) = gdk_pixbuf::Pixbuf::file_info(&d).unwrap();
+        assert_eq!((fmt.name().unwrap().as_str(), w, h), ("jpeg", 800, 400));
+
+        let d = batch_one(&src.join("alpha.png"), &dest(2), r, false).unwrap().unwrap();
+        let got = gdk_pixbuf::Pixbuf::from_file(&d).unwrap();
+        assert_eq!((got.width(), got.height(), got.has_alpha()), (800, 800, true));
     }
 
     #[test]
@@ -656,6 +1039,44 @@ mod batch_tests {
             if d.file_name() != batch_dest(r, Path::new(""), false).file_name() {
                 println!("{}  ->  {}", r.display(), d.file_name().unwrap().to_string_lossy());
             }
+        }
+    }
+
+    #[test]
+    #[ignore] // reads the real catalogue; run explicitly. Dry run only.
+    fn cap_dry_run_over_the_real_catalogue() {
+        let m = load_manifest(&published_manifest_path().expect("no manifest")).unwrap();
+        let scope = Scope::published(&m);
+        let (files, _) = find_in_scope(&scope, "cover");
+        let mismatched: Vec<_> = files
+            .iter()
+            .filter(|f| image_dims(f) != gdk_pixbuf::Pixbuf::file_info(f).map(|(_, w, h)| (w, h)))
+            .collect();
+        println!("header reader disagrees with gdk-pixbuf on {} files: {mismatched:?}", mismatched.len());
+        for cap in [800, 600] {
+            let t = std::time::Instant::now();
+            let (over, _) = cap_survey(&files, cap, 4);
+            let survey_ms = t.elapsed().as_millis();
+            let r = Recipe { canvas: cap, framing: Framing::Cap, disc: None };
+            let rels: Vec<PathBuf> = files.iter().map(|f| f.strip_prefix(&scope.strip).unwrap().to_path_buf()).collect();
+            let t = std::time::Instant::now();
+            let (mut ok, mut left, mut bad) = (0, 0, Vec::new());
+            for ((f, rel), d) in files.iter().zip(&rels).zip(plan_for(&rels, r)) {
+                match batch_one(f, &Path::new("/nonexistent-out").join(d.unwrap()), r, true) {
+                    Ok(Some(_)) => ok += 1,
+                    Ok(None) => left += 1,
+                    Err(e) => bad.push(format!("{}: {e:#}", rel.display())),
+                }
+            }
+            println!(
+                "cap {cap}: survey says {over} ({survey_ms} ms); dry run: {ok} would be written, {left} left alone, {} failed ({} ms)",
+                bad.len(),
+                t.elapsed().as_millis()
+            );
+            for b in &bad {
+                println!("   {b}");
+            }
+            assert_eq!(over, ok + bad.len(), "the count on the button is what the run touches");
         }
     }
 
@@ -752,7 +1173,7 @@ mod batch_tests {
             disc: Some(OuterFill::Alpha),
         };
         let rel = Path::new("A/B/cover.png");
-        let dest = batch_one(&src.join(rel), &out.join(batch_dest(rel, Path::new(""), true)), r, false).unwrap();
+        let dest = batch_one(&src.join(rel), &out.join(batch_dest(rel, Path::new(""), true)), r, false).unwrap().unwrap();
         assert_eq!(dest, out.join("A/B/cover-disc.png"));
         let got = gdk_pixbuf::Pixbuf::from_file(&dest).unwrap();
         assert_eq!((got.width(), got.height()), (200, 200));
@@ -978,7 +1399,7 @@ mod batch_tests {
         let r = Recipe { canvas: 400, framing: Framing::Fit, disc: None };
         let rel = Path::new("cover.png");
 
-        let dest = batch_one(&src.join(rel), &batch_dest(rel, &out, false), r, true).unwrap();
+        let dest = batch_one(&src.join(rel), &batch_dest(rel, &out, false), r, true).unwrap().unwrap();
         assert_eq!(dest, out.join("cover.png"));
         assert!(!dest.exists(), "a dry run writes nothing");
 

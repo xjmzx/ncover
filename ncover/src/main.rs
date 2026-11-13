@@ -916,9 +916,9 @@ fn build_batch(
     ));
     row_r.append(&e_match);
 
-    let dd_frame = gtk::DropDown::from_strings(&["Cover", "Fit"]);
+    let dd_frame = gtk::DropDown::from_strings(&["Cover", "Fit", "Cap"]);
     dd_frame.set_tooltip_text(Some(
-        "Cover fills the square (edges cropped); Fit puts the whole image inside it.\n\nThese are the only framings that mean anything across a folder — a dragged placement is about ONE image's dimensions.",
+        "Cover fills the square (edges cropped); Fit puts the whole image inside it. Both write a square PNG at the size.\n\nCap shrinks only images larger than the size, keeping their shape and format (JPEG stays JPEG), and leaves the rest alone. Use it to tidy a library's covers.\n\nA dragged placement is about ONE image's dimensions, so it is not offered here.",
     ));
     row_r.append(&dd_frame);
 
@@ -1108,20 +1108,33 @@ fn build_batch(
     // in connection order, and this one is connected before the handler that
     // writes `canvas`, so reading the cell here would render the size you just
     // moved away from.
-    let note_from = |sel: u32| {
+    let note_from = |sel: u32, cap: bool| {
         let c = sane_canvas(
             CANVAS_SIZES
                 .get(sel as usize)
                 .copied()
                 .unwrap_or(CANVAS_DEFAULT),
         );
-        format!("\u{2192} {c}\u{d7}{c} PNG")
+        if cap {
+            format!("\u{2192} at most {c} px, same format")
+        } else {
+            format!("\u{2192} {c}\u{d7}{c} PNG")
+        }
     };
-    size_note.set_text(&note_from(size_dd.selected()));
+    size_note.set_text(&note_from(size_dd.selected(), false));
     size_dd.connect_selected_notify(clone!(
         #[weak(rename_to = note)]
         size_note,
-        move |dd| note.set_text(&note_from(dd.selected()))
+        #[weak]
+        dd_frame,
+        move |dd| note.set_text(&note_from(dd.selected(), dd_frame.selected() == 2))
+    ));
+    dd_frame.connect_selected_notify(clone!(
+        #[weak(rename_to = note)]
+        size_note,
+        #[weak]
+        size_dd,
+        move |dd| note.set_text(&note_from(size_dd.selected(), dd.selected() == 2))
     ));
 
     // Where the images come from — folder or manifest. Shared by Run, Preview,
@@ -1181,15 +1194,15 @@ fn build_batch(
                     _ => return Err("A gradient needs two colours — pick a second one.".into()),
                 },
             };
-            Ok(Recipe {
-                canvas: canvas.get(),
-                framing: if dd_frame.selected() == 1 {
-                    Framing::Fit
-                } else {
-                    Framing::Cover
-                },
-                disc,
-            })
+            let framing = match dd_frame.selected() {
+                1 => Framing::Fit,
+                2 => Framing::Cap,
+                _ => Framing::Cover,
+            };
+            if framing == Framing::Cap && disc.is_some() {
+                return Err("Cap keeps each image's own shape, and a disc needs a square. Choose No disc to cap.".into());
+            }
+            Ok(Recipe { canvas: canvas.get(), framing, disc })
         })
     };
     let resolve_recipe: Rc<dyn Fn() -> Option<Recipe>> = {
@@ -1257,9 +1270,9 @@ fn build_batch(
                     .iter()
                     .map(|f| f.strip_prefix(&strip).unwrap_or(f).to_path_buf())
                     .collect();
-                let dests = plan_dests(&rels, recipe.disc.is_some());
+                let dests = plan_for(&rels, recipe);
 
-                let (mut ok, mut failed) = (0usize, 0usize);
+                let (mut ok, mut failed, mut left) = (0usize, 0usize, 0usize);
                 let mut stopped = false;
                 for ((f, rel), dest) in files.iter().zip(rels).zip(dests) {
                     if worker_stop.load(Ordering::Relaxed) {
@@ -1271,7 +1284,8 @@ fn build_batch(
                             .map_err(|e| format!("{e:#}")) // {:#} = the whole context chain
                     });
                     match &result {
-                        Ok(_) => ok += 1,
+                        Ok(Some(_)) => ok += 1,
+                        Ok(None) => left += 1,
                         Err(_) => failed += 1,
                     }
                     let _ = tx.send_blocking(BatchMsg::One {
@@ -1279,7 +1293,7 @@ fn build_batch(
                         result,
                     });
                 }
-                let _ = tx.send_blocking(BatchMsg::Done { ok, failed, stopped });
+                let _ = tx.send_blocking(BatchMsg::Done { ok, failed, left, stopped });
             });
 
             glib::spawn_future_local(clone!(
@@ -1316,9 +1330,14 @@ fn build_batch(
                                 // until the list is full — you need to see what a
                                 // dry run would write, but you do not need to read
                                 // 12,000 of them.
-                                if bad || rows < RESULT_ROWS {
+                                // Files Cap leaves alone get no row: in a
+                                // library that is most of them, and the
+                                // summary counts them.
+                                if matches!(result, Ok(None)) {
+                                } else if bad || rows < RESULT_ROWS {
                                     let l = Label::new(Some(&match &result {
-                                        Ok(d) => format!(
+                                        Ok(None) => unreachable!(),
+                                        Ok(Some(d)) => format!(
                                             "{}  →  {}",
                                             rel,
                                             d.file_name()
@@ -1350,11 +1369,16 @@ fn build_batch(
                                     ));
                                 }
                             }
-                            BatchMsg::Done { ok, failed, stopped } => {
+                            BatchMsg::Done { ok, failed, left, stopped } => {
                                 let verb = if stopped { "stopped" } else { "done" };
                                 l_prog.set_text(&format!(
-                                    "{verb} — {ok} {}{}",
+                                    "{verb} — {ok} {}{}{}",
                                     if dry { "would be written" } else { "written" },
+                                    if left > 0 {
+                                        format!(" · {left} already within the cap, left alone")
+                                    } else {
+                                        String::new()
+                                    },
                                     if failed > 0 {
                                         format!(" · {failed} failed")
                                     } else {
@@ -1635,13 +1659,9 @@ fn build_batch(
         }
 
         // The survey is current. Is the sample?
-        let Some((first, strip)) = survey_now
-            .borrow()
-            .as_ref()
-            .map(|(s, strip)| (s.first.clone(), strip.clone()))
-        else {
+        if survey_now.borrow().is_none() {
             return glib::ControlFlow::Continue; // still walking
-        };
+        }
         let recipe = recipe_now();
         let rkey = format!("{skey}|{recipe:?}");
         if shown_sample.borrow().as_ref() == Some(&rkey) {
@@ -1654,6 +1674,11 @@ fn build_batch(
         *shown_sample.borrow_mut() = Some(rkey);
         let g = sample_gen.get() + 1;
         sample_gen.set(g);
+        let (files, first, strip, total) = {
+            let b = survey_now.borrow();
+            let (sv, strip) = b.as_ref().unwrap();
+            (sv.files.clone(), sv.first.clone(), strip.clone(), sv.total)
+        };
         let recipe = match recipe {
             Ok(r) => r,
             Err(e) => {
@@ -1665,23 +1690,36 @@ fn build_batch(
                 return glib::ControlFlow::Continue;
             }
         };
+        let cap = recipe.framing == Framing::Cap;
+        if !cap {
+            // Back from Cap: the button promises the whole set again.
+            b_run.set_label(&format!("Run ({total} file{})", if total == 1 { "" } else { "s" }));
+        }
         if first.is_empty() {
             samples_row.set_visible(false);
             return glib::ControlFlow::Continue;
         }
         samples_row.set_visible(true);
-        samples_note.set_text("rendering…");
-        let n = first.len();
-        let (tx, rx) = async_channel::bounded::<Vec<(String, std::result::Result<ThumbBytes, String>)>>(1);
+        samples_note.set_text(if cap { "reading sizes…" } else { "rendering…" });
+        type Sampled = (Option<usize>, Vec<(String, std::result::Result<ThumbBytes, String>)>);
+        let (tx, rx) = async_channel::bounded::<Sampled>(1);
         std::thread::spawn(move || {
-            let out = first
+            // Under Cap the useful sample is the files it would CHANGE, and
+            // the useful count is how many: read from headers, all of them.
+            let (over, pick) = if cap {
+                let (over, pick) = cap_survey(&files, recipe.canvas, SAMPLE_N);
+                (Some(over), pick)
+            } else {
+                (None, first)
+            };
+            let out = pick
                 .iter()
                 .map(|f| {
                     let label = f.strip_prefix(&strip).unwrap_or(f).display().to_string();
                     (label, render_thumb(f, recipe, SAMPLE_PX).map_err(|e| format!("{e:#}")))
                 })
                 .collect();
-            let _ = tx.send_blocking(out);
+            let _ = tx.send_blocking((over, out));
         });
         glib::spawn_future_local(clone!(
             #[strong]
@@ -1690,11 +1728,14 @@ fn build_batch(
             samples_box,
             #[weak]
             samples_note,
+            #[weak]
+            b_run,
             async move {
-                let Ok(thumbs) = rx.recv().await else { return };
+                let Ok((over, thumbs)) = rx.recv().await else { return };
                 if sample_gen.get() != g {
                     return;
                 }
+                let n = thumbs.len();
                 // Swap all at once: four cells blinking out one by one while
                 // a slider moves reads as the app struggling.
                 while let Some(c) = samples_box.first_child() {
@@ -1711,13 +1752,26 @@ fn build_batch(
                     };
                     samples_box.append(&thumb_cell(&label, thumb, err.as_deref(), SAMPLE_PX, 12));
                 }
-                samples_note.set_text(&format!(
-                    "The first {n}, through the same renderer the run uses{}. Preview shows {PREVIEW_N}.",
-                    if failed > 0 {
-                        format!(" · {failed} would fail (hover for why)")
+                let fails = if failed > 0 {
+                    format!(" · {failed} would fail (hover for why)")
+                } else {
+                    String::new()
+                };
+                if let Some(over) = over {
+                    b_run.set_label(&format!("Run ({over} of {total} to shrink)"));
+                    samples_note.set_text(&if over == 0 {
+                        format!("All {total} are already within {} px. Cap would write nothing.", recipe.canvas)
                     } else {
-                        String::new()
-                    }
+                        format!(
+                            "{over} of {total} are larger than {} px and would be shrunk; the other {} are left alone. Shown: the first {n} that change{fails}.",
+                            recipe.canvas,
+                            total - over
+                        )
+                    });
+                    return;
+                }
+                samples_note.set_text(&format!(
+                    "The first {n}, through the same renderer the run uses{fails}. Preview shows {PREVIEW_N}."
                 ));
             }
         ));

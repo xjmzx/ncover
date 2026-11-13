@@ -23,6 +23,18 @@ to diverge. Its version numbers are independent of these.
   disc or picked colours change, through the same renderer a run writes
   from. Preview still renders twelve.
 
+- **Cap**, a third batch framing for tidying a library's covers. It shrinks
+  only images larger than the chosen size, so their longer side becomes that
+  size. It keeps each image's shape (no crop, no padding) and its format
+  (JPEG stays JPEG at quality 92, PNG stays PNG), and writes nothing at all
+  for an image already within the cap. The survey line and the Run button
+  say how many it would change ("Run (245 of 2377 to shrink)"), the samples
+  show the first ones that change, and the Dry run lists exactly those.
+  Shrinking averages every source pixel by how much of it each output pixel
+  covers, with alpha premultiplied, instead of keeping the nearest one, so
+  halftones and fine type do not break up. WebP and GIF over the cap are
+  refused with the reason rather than converted.
+
 ### Fixed
 - **Two covers in one release overwrote each other.** Every batch output is
   a PNG named after its source, so a release holding both `cover.jpg` and

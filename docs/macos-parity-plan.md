@@ -205,6 +205,12 @@ failing file in Preview. How it differs from the plan or the Mac:
 - The image column now scrolls. With the survey and sample, an open Batch
   was taller than the screen and pushed the window off the bottom.
 
+**Added after phase 4 (2026-11-13), not in the Mac app:** a Cap framing
+for batch (shrink-only, aspect and format kept, untouched files not
+written), for tidying the library's covers. It brought the area-averaging
+resampler forward from phase 2 as `area_resample`; phase 2 still has to use
+it inside `compose` for Cover / Fit shrinking.
+
 ## Phase 5: type
 
 Needs phase 3 for the vector half. This is the part that differs most from
