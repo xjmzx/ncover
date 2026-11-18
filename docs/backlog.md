@@ -22,6 +22,26 @@ then Square, then the library write-back.
 
 ## List scope and dimension filters
 
+**ndisc's list format (built in ndisc 2026-11-18, unreleased).** One line per
+release, no header, tab-separated: `folder` · `cover file` · `artist — title`
+· disk `WxH` · published `WxH` · format · kinds · actions (`-` = empty).
+The **actions** column is what ncover acts on, a fixed vocabulary in run
+order: `resource`, `review`, `ncover:square`, `ncover:cap`, `ncover:convert`,
+`ndisc:reconcile`, `ndisc:upload`. The logic this asks of ncover:
+
+- **One job per run.** Picking a job (Cap, Square, Convert) selects the lines
+  whose actions include `ncover:<job>`; that is the batch. Every other line is
+  counted, not touched, and the survey says so ("112 need a new source · 46
+  are ndisc's to upload").
+- **The cover file, not the folder.** The walk takes the line's `cover file`
+  only, so a release's back or inlay is never processed. The folder stays the
+  key and the grouping in the Files list.
+- **Order when a cover needs several jobs:** square, then cap; convert joins
+  whichever run writes last. A `resource` line never carries an ncover action.
+- **Convert (PNG → JPEG) is a new job.** Today only Cap keeps the source's
+  format; Cover / Fit always write PNG. Real catalogue 2026-11-18: 247
+  square, 23 convert, 2 cap, 112 resource.
+
 **Why.** Whether a cover is non-square, too large or too small is a fact about
 the file, and ncover already reads image headers fast (`image_dims`, built for
 Cap). ncover can find these covers itself, in any folder, without ndisc.
