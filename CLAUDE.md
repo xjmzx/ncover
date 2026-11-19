@@ -110,8 +110,8 @@ porting further features across.
   and "Run (N files)") both read it. Do not walk a scope anywhere else: the
   number on the Run button is only true because the survey and the run
   cannot select different files. A test ties the two counts together.
-- **The survey and the sample are driven by a 300 ms ticker, not by signal
-  handlers.** Every input goes into a key (`scope_key`, and the sample key =
+- **The survey and the grid are driven by a 300 ms ticker, not by signal
+  handlers.** Every input goes into a key (`scope_key`, and the plan key =
   scope key + `recipe_now()`), and a key that has held for one tick is
   applied. Adding an input to the recipe means making it part of the key;
   wiring a `connect_*` handler instead will miss the picked colours, which
@@ -125,9 +125,19 @@ porting further features across.
   (`is_mapped`) or a run is in flight.
 - **Batch is a page of its own** (header switch Picker · Batch · Palettes).
   It is still built inside `build_image_view`, because its size picker is
-  bound to the canvas size, and handed out in `ImageView`. Its outputs
-  (Preview sheet, review list, run results) share one `Stack` on the right;
-  whatever runs last is the page shown.
+  bound to the canvas size, and handed out in `ImageView`. The right side is
+  a `Stack` of the grid ("Files") and the last run's results.
+- **The grid and the numbered Files list are ONE model** (a
+  `gio::ListStore` of `GridItem`s) under one `SingleSelection`, filled by
+  `show_plan` from `plan_items`. That is why their numbers agree, and why
+  under Cap / Square the grid's length is the Run button's count (the
+  ignored `real_list_counts_agree_with_the_run` checks it against a real
+  export). Never give either view a list of its own.
+- **Grid thumbnails render lazily**: a cell asks for its file when first
+  bound, `RENDER_WORKERS` threads render it through `review_one` (so
+  `batch_render`, the run's function), and each plan is a generation, so
+  workers of an older one stop. Do not render the whole plan up front: a
+  whole-library Cover scope is ~2,400 renders at the full canvas size.
 - **Output names are planned for the whole run (`plan_dests`), never per
   file.** Every output is `.png`, so `batch_dest` alone maps `cover.jpg`
   and `cover.png` in one release to the same file, and the second write
@@ -138,13 +148,13 @@ porting further features across.
 - **Cap is not a framing onto a square, and it must not write what it does
   not change.** `Framing::Cap` returns `Ok(None)` from `batch_one` for a file
   within the cap, and keeps the source's name, extension and format
-  (`plan_for`, `cap_format`). Its count (`change_survey`) and the run decide
+  (`plan_for`, `cap_format`). Its count (`plan_items`) and the run decide
   "within the cap" from the same `image_dims` header read and `cap_size`, and
   an ignored test checks that against the real catalogue. Keep it that way, or
   "Run (245 of 2377 to shrink)" stops being true.
 - **Square follows Cap's rules** (`Framing::keeps_file`): same name and
   format, `Ok(None)` for a file already square, and its count
-  (`change_survey`) and the run both ask `would_change`. Its crop is the
+  (`plan_items`) and the run both ask `would_change`. Its crop is the
   centre of the long side; a cover that needs another crop is the editor's
   job, not Batch's.
 - **A list scope is still one walk.** `Scope::list` turns each selected line
@@ -188,7 +198,7 @@ porting further features across.
 - **Two writing modes with different safety.** *Batch* never writes over its
   source, but *Overwrite* replaces the original PNG in place. They are one click
   apart in the UI. Treat any change near the write path as touching user data,
-  and keep the Preview contact sheet and dry run working — they are the guard.
+  and keep the Batch grid and dry run working — they are the guard.
 - **It consumes `ndisc` output.** Batch can run a recipe over an ndisc-published
   discography, which makes it a downstream reader of the publish manifest. It
   publishes nothing itself and holds no keys.
@@ -202,8 +212,9 @@ porting further features across.
 ## Releasing
 
 `make version V=x.y.z`, update `CHANGELOG.md`, commit, tag `vx.y.z`, push the
-tag. The workflow builds on **ubuntu-24.04** — 22.04 ships GTK 4.6 and the GUI
-asks for gtk4's `v4_10` feature, so it fails there at compile time.
+tag. The workflow builds on **ubuntu-24.04** (GTK 4.14) — 22.04 ships GTK 4.6
+and the GUI asks for gtk4's `v4_12` feature (the grid's `scroll_to`), so it
+fails there at compile time.
 
 **The build needs `libx11-xcb-dev`**, which is easy to miss because it is not
 part of `libx11-dev`. The `xcb` crate's `xlib_xcb` feature links `-lX11-xcb`,

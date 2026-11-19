@@ -32,7 +32,7 @@ X11 screen picker and grew into a small artwork tool. Part of the `n.*` suite.
 - A **Source / Result** rail to compare the raw image against what you built.
 - Save as PNG, or **Overwrite** the original PNG in place.
 - **Batch** the same recipe over a folder, or over an ndisc-published
-  discography — with a Preview contact sheet and a dry run. It never writes over
+  discography — with a live grid of every file it would touch and a dry run. It never writes over
   your source.
 
 Output is always PNG (the disc mask needs alpha).

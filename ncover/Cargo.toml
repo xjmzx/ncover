@@ -13,7 +13,7 @@ name = "ncover"
 path = "src/main.rs"
 
 [dependencies]
-gtk4 = { version = "0.9", features = ["v4_10"] }
+gtk4 = { version = "0.9", features = ["v4_12"] }
 gio = "0.20"
 glib = "0.20"
 serde = { version = "1", features = ["derive"] }

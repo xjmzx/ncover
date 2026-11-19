@@ -11,6 +11,13 @@ to diverge. Its version numbers are independent of these.
 
 ## [Unreleased]
 
+### Removed
+- **Preview, its twelve-thumbnail sheet and the four automatic samples.** The
+  grid replaces all three: it is always current and shows every file.
+
+### Changed
+- Builds against gtk4's `v4_12` feature (was `v4_10`): GTK 4.12 or newer.
+
 ### Added
 - **Batch scope "From a list…"**: a text file with one release folder per
   line, such as ndisc's Export list from Local covers vs Blossom. Where a
@@ -22,15 +29,23 @@ to diverge. Its version numbers are independent of these.
   column, Cap takes only the lines marked `ncover:cap` and Square only
   those marked `ncover:square`. The survey line counts the rest without
   touching them ("not in this run: 112 need a new source · 24 to review …").
-- **A review list for Cap and Square.** Preview lists every file the run
-  would change, not the first twelve: before and after, the release name,
-  the size change in words ("600 × 533 → 533 × 533 · 67 px off the sides
-  (11%)") and Open folder. The most cropped (Square) or largest (Cap) come
-  first.
-- **Batch is a page of its own**, beside Picker and Palettes. Its controls sit
-  in a column on the left, and the preview, review list or run results fill
-  the rest of the window. The colours a Colour or Gradient disc will use show
-  beside the recipe.
+- **Batch shows every file it would touch, as a grid.** The right side of
+  the Batch page is a live grid that follows the scope and the framing, with
+  no button to press: under Cover and Fit every file, in run order, as the
+  run would write it; under Cap and Square only the files the run would
+  change, the most cropped (Square) or largest (Cap) first. Thumbnails render
+  through the run's own function, and only for the cells on screen, so a
+  whole library scrolls. **Before** flips the grid to the files as they are
+  now; **Open folder** shows the selected cover in the file manager.
+- **The Files list is numbered and is the same list.** It sits under the
+  controls on the left and holds exactly the grid's files, in the grid's
+  order, under the grid's numbers, each with its size change in words
+  ("600 × 533 → 533 × 533 · 67 px off the sides (11%)"). Selecting a file
+  in either scrolls the other to it.
+- **Batch is a page of its own**, beside Picker and Palettes. Its controls
+  and the Files list sit in a column on the left, and the grid or the last
+  run's results fill the rest of the window. The colours a Colour or
+  Gradient disc will use show beside the recipe.
 - **The Picker page's side columns can be hidden** from the header: the
   colours column (left) and the Source / Result rail (right). Each remembers
   its state. Turning the tips on brings the colours column back, since the

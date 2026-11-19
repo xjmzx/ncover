@@ -793,7 +793,7 @@ fn build_tips(window: &ApplicationWindow, toggle: &ToggleButton) -> GBox {
         "Saves: PNG only.",
         "SVG: reads its declared colours, fonts, text.",
         "Canvas: square, 200–1000 px.",
-        "Batch never writes your source — Preview first.",
+        "Batch never writes your source — check the grid first.",
     ] {
         bullet(&b, line);
     }
@@ -860,21 +860,13 @@ fn build_batch(
     let list: Rc<RefCell<Option<(PathBuf, CoverList)>>> = Rc::new(RefCell::new(None));
 
     // Batch is a page of its own: the controls in a column on the left
-    // (`body`), and what they produce on the right, at the window's full
-    // height. One area for all three outputs, since only one is current: the
-    // Preview sheet, the review list (Cap / Square), a run's results.
+    // (`body`), above the numbered Files list, and on the right at the
+    // window's full height either the grid of those files or the last run's
+    // results.
     let body = GBox::new(Orientation::Vertical, 8);
     let main_stack = gtk::Stack::new();
     main_stack.set_hexpand(true);
     main_stack.set_vexpand(true);
-    let empty = Label::new(Some(
-        "Preview shows what the recipe does before anything is written. Under Cap or Square it lists every file the run would change, before and after.\n\nA run's results appear here.",
-    ));
-    empty.add_css_class("dim-label");
-    empty.set_wrap(true);
-    empty.set_max_width_chars(60);
-    empty.set_valign(gtk::Align::Center);
-    main_stack.add_named(&empty, Some("empty"));
 
     // --- scope: a folder, a cover list, or ndisc's published discography ---
     // The published option is only offered when ndisc has actually exported a
@@ -1009,37 +1001,9 @@ fn build_batch(
     survey_lbl.set_xalign(0.0);
     survey_lbl.set_wrap(true);
     body.append(&survey_lbl);
-    let survey_list = ListBox::new();
-    survey_list.set_selection_mode(gtk::SelectionMode::None);
-    let survey_scroll = gtk::ScrolledWindow::new();
-    survey_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    survey_scroll.set_min_content_height(80);
-    survey_scroll.set_max_content_height(220);
-    survey_scroll.set_propagate_natural_height(true);
-    survey_scroll.set_child(Some(&survey_list));
-    let survey_exp = gtk::Expander::new(Some("Files"));
-    survey_exp.set_child(Some(&survey_scroll));
-    survey_exp.set_visible(false);
-    body.append(&survey_exp);
-
-    // --- what it will look like: the first few, rendered unasked ---
-    let samples_row = GBox::new(Orientation::Vertical, 4);
-    let samples_box = GBox::new(Orientation::Horizontal, 8);
-    let samples_note = Label::new(None);
-    samples_note.add_css_class("dim-label");
-    samples_note.set_xalign(0.0);
-    samples_note.set_wrap(true);
-    samples_row.append(&samples_box);
-    samples_row.append(&samples_note);
-    samples_row.set_visible(false);
-    body.append(&samples_row);
 
     // --- run ---
     let row_go = GBox::new(Orientation::Horizontal, 6);
-    let b_preview = Button::with_label("Preview");
-    b_preview.set_tooltip_text(Some(
-        "Render the first few outputs and show them as thumbnails — SEE what the recipe does before it writes anything.\n\nUnder Cap or Square it lists EVERY file the run would change instead, before and after with the sizes, the most cropped (or largest) first.",
-    ));
     let b_dry = Button::with_label("Dry run");
     b_dry.set_tooltip_text(Some(
         "List what WOULD be written, writing nothing. Every image is still opened and framed, so a file that would fail, fails here.",
@@ -1048,7 +1012,6 @@ fn build_batch(
     b_run.add_css_class("suggested-action");
     let b_stop = Button::with_label("Stop");
     b_stop.set_sensitive(false);
-    row_go.append(&b_preview);
     row_go.append(&b_dry);
     row_go.append(&b_run);
     row_go.append(&b_stop);
@@ -1059,32 +1022,42 @@ fn build_batch(
     l_prog.set_wrap(true);
     body.append(&row_go);
 
-    // The preview contact sheet — hidden until you ask for one.
-    let preview_flow = gtk::FlowBox::new();
-    preview_flow.set_selection_mode(gtk::SelectionMode::None);
-    preview_flow.set_max_children_per_line(6);
-    preview_flow.set_row_spacing(6);
-    preview_flow.set_column_spacing(6);
-    let preview_scroll = gtk::ScrolledWindow::new();
-    preview_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    preview_scroll.set_child(Some(&preview_flow));
-    preview_flow.set_valign(gtk::Align::Start);
-    main_stack.add_named(&preview_scroll, Some("preview"));
+    // --- the files: ONE list, two views ---
+    // The grid on the right and the numbered list on the left are two views
+    // of one model under one selection: the same files, in the same order,
+    // under the same numbers. Picking a file in either shows it in the other.
+    // The model is refilled by the ticker below from `plan_items`, so under
+    // Cap and Square it holds exactly the files the run would change.
+    let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+    let selection = gtk::SingleSelection::new(Some(store.clone()));
+    selection.set_autoselect(false);
+    selection.set_can_unselect(true);
+    let before = Rc::new(Cell::new(false));
+    // Thumbnails render lazily, for the cells on screen. Each plan is a
+    // generation; workers of an older one stop at their next file.
+    let render_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let render_tx: RenderTx = Rc::new(RefCell::new(None));
 
-    // The review list: under Cap or Square, Preview lists EVERY file the run
-    // would change, before and after, with the sizes. Twelve thumbnails are a
-    // sample; a list of 245 crops is something you can check one by one.
-    let review_list = ListBox::new();
-    review_list.set_selection_mode(gtk::SelectionMode::None);
-    review_list.add_css_class("boxed-list");
-    let review_scroll = gtk::ScrolledWindow::new();
-    review_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    review_scroll.set_child(Some(&review_list));
-    review_list.set_valign(gtk::Align::Start);
-    main_stack.add_named(&review_scroll, Some("review"));
-    // Bumped by every Preview, so a review still rendering stops when a new
-    // one starts instead of appending to it.
-    let review_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let files_head = Label::new(Some("Files"));
+    files_head.add_css_class("heading");
+    files_head.set_xalign(0.0);
+    files_head.set_wrap(true);
+    let files_view = gtk::ListView::new(Some(selection.clone()), Some(files_factory()));
+    let files_scroll = gtk::ScrolledWindow::new();
+    files_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    files_scroll.set_vexpand(true);
+    files_scroll.set_child(Some(&files_view));
+
+    let grid = gtk::GridView::new(
+        Some(selection.clone()),
+        Some(grid_factory(before.clone(), render_gen.clone(), render_tx.clone())),
+    );
+    grid.set_min_columns(2);
+    grid.set_max_columns(24);
+    let grid_scroll = gtk::ScrolledWindow::new();
+    grid_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    grid_scroll.set_child(Some(&grid));
+    main_stack.add_titled(&grid_scroll, Some("grid"), "Files");
 
     let results = ListBox::new();
     results.set_selection_mode(gtk::SelectionMode::None);
@@ -1093,7 +1066,72 @@ fn build_batch(
     res_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     res_scroll.set_child(Some(&results));
     results.set_valign(gtk::Align::Start);
-    main_stack.add_named(&res_scroll, Some("results"));
+    main_stack.add_titled(&res_scroll, Some("results"), "Last run");
+
+    // Above the grid: what it shows, and what to do with a file.
+    let head = Label::new(Some("Choose a source folder."));
+    head.set_xalign(0.0);
+    head.set_wrap(true);
+    let fails = Label::new(None);
+    fails.add_css_class("error");
+    fails.set_xalign(0.0);
+    fails.set_visible(false);
+    let fail_count = Rc::new(Cell::new(0usize));
+    let b_before = ToggleButton::with_label("Before");
+    b_before.set_tooltip_text(Some(
+        "Show each file as it is now instead of what the run would write. The numbers and the order stay put.",
+    ));
+    let b_open = Button::with_label("Open folder");
+    b_open.set_sensitive(false);
+    b_open.set_tooltip_text(Some(
+        "Show the selected cover in the file manager, to crop it by hand or replace it.",
+    ));
+    let switcher = gtk::StackSwitcher::new();
+    switcher.set_stack(Some(&main_stack));
+
+    b_before.connect_toggled(clone!(
+        #[strong]
+        before,
+        #[weak]
+        store,
+        move |b| {
+            before.set(b.is_active());
+            for i in 0..store.n_items() {
+                if let Some(obj) = store.item(i).and_downcast::<glib::BoxedAnyObject>() {
+                    paint_cell(&obj.borrow::<GridItem>(), b.is_active());
+                }
+            }
+        }
+    ));
+    selection.connect_selected_notify(clone!(
+        #[weak]
+        grid,
+        #[weak]
+        files_view,
+        #[weak]
+        b_open,
+        move |sel| {
+            let pos = sel.selected();
+            b_open.set_sensitive(pos != gtk::INVALID_LIST_POSITION);
+            if pos == gtk::INVALID_LIST_POSITION {
+                return;
+            }
+            // Only as far as needed: the view you clicked in does not move.
+            grid.scroll_to(pos, gtk::ListScrollFlags::NONE, None);
+            files_view.scroll_to(pos, gtk::ListScrollFlags::NONE, None);
+        }
+    ));
+    b_open.connect_clicked(clone!(
+        #[weak]
+        window,
+        #[weak]
+        selection,
+        move |_| {
+            let Some(obj) = selection.selected_item().and_downcast::<glib::BoxedAnyObject>() else { return };
+            let f = gio::File::for_path(&obj.borrow::<GridItem>().p.path);
+            gtk::FileLauncher::new(Some(&f)).open_containing_folder(Some(&window), gio::Cancellable::NONE, |_| {});
+        }
+    ));
 
     // Under the list scope the source button picks the list, not a folder.
     b_src.connect_clicked(clone!(
@@ -1594,142 +1632,33 @@ fn build_batch(
         move |_| stop.store(true, Ordering::Relaxed)
     ));
 
-    // Preview: render the first PREVIEW_N outputs and show them as a contact
-    // sheet. Nothing is written — this is the "see it before it can mess anything
-    // up" pass, and for a big scope it is the difference between catching a wrong
-    // recipe and discovering it in 500 files.
-    let preview = {
-        let e_match = e_match.clone();
-        let resolve_scope = resolve_scope.clone();
-        let resolve_recipe = resolve_recipe.clone();
-        let preview_flow = preview_flow.clone();
-        let l_prog = l_prog.clone();
-        let b_preview = b_preview.clone();
-        let review_list = review_list.clone();
-        let main_stack = main_stack.clone();
-        let review_gen = review_gen.clone();
-        let window = window.clone();
-        Rc::new(move || {
-            let Some(scope) = resolve_scope() else { return };
-            let Some(recipe) = resolve_recipe() else { return };
-            let needle = e_match.text().to_string();
-
-            while let Some(c) = preview_flow.first_child() {
-                preview_flow.remove(&c);
-            }
-            let g = review_gen.fetch_add(1, Ordering::Relaxed) + 1;
-            if recipe.framing.keeps_file() {
-                start_review(
-                    scope,
-                    needle,
-                    recipe,
-                    g,
-                    review_gen.clone(),
-                    &review_list,
-                    &main_stack,
-                    &l_prog,
-                    &window,
-                );
-                return;
-            }
-            main_stack.set_visible_child_name("preview");
-            l_prog.set_text("rendering preview…");
-            b_preview.set_sensitive(false);
-
-            let (tx, rx) = async_channel::unbounded::<PreviewMsg>();
-            std::thread::spawn(move || {
-                let (files, _) = find_in_scope(&scope, &needle);
-                let strip = scope.strip;
-                let _ = tx.send_blocking(PreviewMsg::Total(files.len()));
-                // Render only the first N. Pixbuf work off the main thread is
-                // fine — it is image data, never GTK — and only the RGBA bytes
-                // (Send) cross back.
-                for f in files.iter().take(PREVIEW_N) {
-                    let label = f.strip_prefix(&strip).unwrap_or(f).display().to_string();
-                    let msg = match render_thumb(f, recipe, PREVIEW_PX) {
-                        Ok(t) => PreviewMsg::Thumb {
-                            label,
-                            thumb: Some(t),
-                            err: None,
-                        },
-                        Err(e) => PreviewMsg::Thumb {
-                            label,
-                            thumb: None,
-                            err: Some(format!("{e:#}")),
-                        },
-                    };
-                    let _ = tx.send_blocking(msg);
-                }
-                let _ = tx.send_blocking(PreviewMsg::Done);
-            });
-
-            glib::spawn_future_local(clone!(
-                #[weak]
-                preview_flow,
-                #[weak]
-                l_prog,
-                #[weak]
-                b_preview,
-                async move {
-                    let mut total = 0usize;
-                    let mut shown = 0usize;
-                    let mut failed = 0usize;
-                    while let Ok(msg) = rx.recv().await {
-                        match msg {
-                            PreviewMsg::Total(n) => {
-                                total = n;
-                                if n == 0 {
-                                    l_prog.set_text("nothing matched");
-                                }
-                            }
-                            PreviewMsg::Thumb { label, thumb, err } => {
-                                shown += 1;
-                                if thumb.is_none() {
-                                    failed += 1;
-                                }
-                                let cell = thumb_cell(&label, thumb, err.as_deref(), PREVIEW_PX, 18);
-                                preview_flow.insert(&cell, -1);
-                            }
-                            PreviewMsg::Done => {
-                                let more = total.saturating_sub(shown);
-                                l_prog.set_text(&format!(
-                                    "preview: {shown} of {total}{}{}",
-                                    if failed > 0 {
-                                        format!(" · {failed} failed")
-                                    } else {
-                                        String::new()
-                                    },
-                                    if more > 0 {
-                                        format!(" · {more} more not shown")
-                                    } else {
-                                        String::new()
-                                    }
-                                ));
-                                b_preview.set_sensitive(true);
-                                break;
-                            }
-                        }
-                    }
-                }
-            ));
-        })
-    };
-    b_preview.connect_clicked(clone!(
-        #[strong]
-        preview,
-        move |_| preview()
-    ));
-
-    let side = gtk::ScrolledWindow::new();
-    side.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    // The controls scroll if the window is short; the Files list takes the
+    // rest of the column and scrolls on its own.
+    let controls = gtk::ScrolledWindow::new();
+    controls.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    controls.set_propagate_natural_height(true);
     body.set_margin_end(6); // room for the scrollbar
-    side.set_child(Some(&body));
+    controls.set_child(Some(&body));
+    let side = GBox::new(Orientation::Vertical, 8);
     side.set_size_request(460, -1);
     side.set_hexpand(false);
     side.set_vexpand(true);
+    side.append(&controls);
+    side.append(&files_head);
+    side.append(&files_scroll);
 
+    let bar = GBox::new(Orientation::Horizontal, 8);
+    let gap = GBox::new(Orientation::Horizontal, 0);
+    gap.set_hexpand(true);
+    bar.append(&switcher);
+    bar.append(&gap);
+    bar.append(&b_before);
+    bar.append(&b_open);
     let main = GBox::new(Orientation::Vertical, 8);
     main.set_hexpand(true);
+    main.append(&bar);
+    main.append(&head);
+    main.append(&fails);
     main.append(&l_prog);
     main.append(&main_stack);
 
@@ -1752,6 +1681,88 @@ fn build_batch(
     // applied: that is the debounce, so typing a filter walks the tree once
     // it pauses, not per keystroke. Nothing on screen can be stale for more
     // than a tick or two, because nothing can change without changing a key.
+    // Put a plan on screen: refill the one model both views read, and start
+    // a new render generation for its thumbnails. `None` clears it.
+    let show_plan: Rc<dyn Fn(Vec<GridItem>, Option<Recipe>)> = {
+        let store = store.clone();
+        let render_gen = render_gen.clone();
+        let render_tx = render_tx.clone();
+        let before = before.clone();
+        let fails = fails.clone();
+        let fail_count = fail_count.clone();
+        Rc::new(move |items: Vec<GridItem>, recipe: Option<Recipe>| {
+            let g = render_gen.fetch_add(1, Ordering::Relaxed) + 1;
+            // Dropping the old sender ends the old workers once they look.
+            *render_tx.borrow_mut() = None;
+            fail_count.set(0);
+            fails.set_visible(false);
+            if let Some(recipe) = recipe {
+                let (req_tx, req_rx) = async_channel::unbounded::<(u32, PathBuf)>();
+                let (res_tx, res_rx) = async_channel::unbounded::<(u32, Review)>();
+                for _ in 0..RENDER_WORKERS {
+                    let (rx, tx, gen) = (req_rx.clone(), res_tx.clone(), render_gen.clone());
+                    std::thread::spawn(move || {
+                        while let Ok((pos, path)) = rx.recv_blocking() {
+                            if gen.load(Ordering::Relaxed) != g {
+                                return;
+                            }
+                            // `review_one` renders through `batch_render`,
+                            // the function the run writes from.
+                            if tx.send_blocking((pos, review_one(&path, recipe, GRID_PX))).is_err() {
+                                return;
+                            }
+                        }
+                    });
+                }
+                *render_tx.borrow_mut() = Some(req_tx);
+                let render_gen = render_gen.clone();
+                glib::spawn_future_local(clone!(
+                    #[weak]
+                    store,
+                    #[strong]
+                    before,
+                    #[weak]
+                    fails,
+                    #[strong]
+                    fail_count,
+                    async move {
+                        while let Ok((pos, rv)) = res_rx.recv().await {
+                            if render_gen.load(Ordering::Relaxed) != g {
+                                return;
+                            }
+                            let Some(obj) = store.item(pos).and_downcast::<glib::BoxedAnyObject>() else { continue };
+                            let it = obj.borrow::<GridItem>();
+                            if it.gen != g {
+                                continue;
+                            }
+                            if rv.after.is_err() {
+                                fail_count.set(fail_count.get() + 1);
+                                fails.set_text(&format!(
+                                    "{} would fail (of those shown so far) \u{2014} hover the cell for why",
+                                    fail_count.get()
+                                ));
+                                fails.set_visible(true);
+                            }
+                            let tex = |r: std::result::Result<(ThumbBytes, (i32, i32)), String>| {
+                                r.map(|(t, d)| (thumb_texture(t), d))
+                            };
+                            *it.shots.borrow_mut() = Some([tex(rv.before), tex(rv.after)]);
+                            paint_cell(&it, before.get());
+                        }
+                    }
+                ));
+            }
+            let items: Vec<glib::BoxedAnyObject> = items
+                .into_iter()
+                .map(|mut it| {
+                    it.gen = g;
+                    glib::BoxedAnyObject::new(it)
+                })
+                .collect();
+            store.splice(0, store.n_items(), &items);
+        })
+    };
+
     let survey_gen = Rc::new(Cell::new(0u64));
     let sample_gen = Rc::new(Cell::new(0u64));
     let shown_scope: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
@@ -1836,8 +1847,9 @@ fn build_batch(
                 Ok(s) => s,
                 Err(e) => {
                     survey_lbl.set_text(&e);
-                    survey_exp.set_visible(false);
-                    samples_row.set_visible(false);
+                    show_plan(Vec::new(), None);
+                    head.set_text(&e);
+                    files_head.set_text("Files");
                     return glib::ControlFlow::Continue;
                 }
             };
@@ -1850,7 +1862,7 @@ fn build_batch(
             let (tx, rx) = async_channel::bounded::<Survey>(1);
             let walk_needle = needle.clone();
             std::thread::spawn(move || {
-                let _ = tx.send_blocking(survey_batch(&scope, &walk_needle, SAMPLE_N));
+                let _ = tx.send_blocking(survey_batch(&scope, &walk_needle));
             });
             let what = if is_folder() { "folder" } else { "release" };
             let left_out = list_left_out();
@@ -1862,17 +1874,13 @@ fn build_batch(
                 #[weak]
                 survey_lbl,
                 #[weak]
-                survey_list,
-                #[weak]
-                survey_exp,
-                #[weak]
                 b_run,
                 async move {
                     let Ok(s) = rx.recv().await else { return };
                     if survey_gen.get() != g {
                         return; // the scope or filter moved on while we walked
                     }
-                    show_survey(&s, what, &needle, &survey_lbl, &survey_list, &survey_exp);
+                    show_survey(&s, what, &needle, &survey_lbl);
                     if !left_out.is_empty() {
                         survey_lbl.set_text(&format!(
                             "{} \u{b7} not in this run: {left_out}",
@@ -1890,7 +1898,7 @@ fn build_batch(
             return glib::ControlFlow::Continue;
         }
 
-        // The survey is current. Is the sample?
+        // The survey is current. Is the plan — what the grid shows?
         if survey_now.borrow().is_none() {
             return glib::ControlFlow::Continue; // still walking
         }
@@ -1906,119 +1914,89 @@ fn build_batch(
         *shown_sample.borrow_mut() = Some(rkey);
         let g = sample_gen.get() + 1;
         sample_gen.set(g);
-        let (files, first, strip, total) = {
+        let (files, names, strip, total) = {
             let b = survey_now.borrow();
             let (sv, strip) = b.as_ref().unwrap();
-            (sv.files.clone(), sv.first.clone(), strip.clone(), sv.total)
+            (sv.files.clone(), sv.names.clone(), strip.clone(), sv.total)
         };
         let recipe = match recipe {
             Ok(r) => r,
             Err(e) => {
-                while let Some(c) = samples_box.first_child() {
-                    samples_box.remove(&c);
-                }
-                samples_note.set_text(&e);
-                samples_row.set_visible(!first.is_empty());
+                show_plan(Vec::new(), None);
+                head.set_text(&e);
                 return glib::ControlFlow::Continue;
             }
         };
-        let cap = recipe.framing.keeps_file();
-        let square = recipe.framing == Framing::Square;
-        if !cap {
-            // Back from Cap or Square: the button promises the whole set again.
-            b_run.set_label(&format!("Run ({total} file{})", if total == 1 { "" } else { "s" }));
-        }
-        if first.is_empty() {
-            samples_row.set_visible(false);
+        if total == 0 {
+            show_plan(Vec::new(), None);
+            head.set_text("Nothing to show.");
             return glib::ControlFlow::Continue;
         }
-        samples_row.set_visible(true);
-        samples_note.set_text(if cap { "reading sizes…" } else { "rendering…" });
-        type Sampled = (Option<usize>, Vec<(String, std::result::Result<ThumbBytes, String>)>);
-        let (tx, rx) = async_channel::bounded::<Sampled>(1);
+        head.set_text("reading sizes\u{2026}");
+        let (tx, rx) = async_channel::bounded::<Vec<Planned>>(1);
         std::thread::spawn(move || {
-            // Under Cap the useful sample is the files it would CHANGE, and
-            // the useful count is how many: read from headers, all of them.
-            let (over, pick) = if cap {
-                let (over, pick) = change_survey(&files, recipe, SAMPLE_N);
-                (Some(over), pick)
-            } else {
-                (None, first)
-            };
-            let out = pick
-                .iter()
-                .map(|f| {
-                    let label = f.strip_prefix(&strip).unwrap_or(f).display().to_string();
-                    (label, render_thumb(f, recipe, SAMPLE_PX).map_err(|e| format!("{e:#}")))
-                })
-                .collect();
-            let _ = tx.send_blocking((over, out));
+            // Headers only: ordering a few thousand covers is quick.
+            let _ = tx.send_blocking(plan_items(&files, &names, recipe));
         });
+        let show_plan = show_plan.clone();
         glib::spawn_future_local(clone!(
             #[strong]
             sample_gen,
             #[weak]
-            samples_box,
-            #[weak]
-            samples_note,
+            head,
             #[weak]
             b_run,
+            #[weak]
+            files_head,
+            #[weak]
+            main_stack,
             async move {
-                let Ok((over, thumbs)) = rx.recv().await else { return };
+                let Ok(plan) = rx.recv().await else { return };
                 if sample_gen.get() != g {
                     return;
                 }
-                let n = thumbs.len();
-                // Swap all at once: four cells blinking out one by one while
-                // a slider moves reads as the app struggling.
-                while let Some(c) = samples_box.first_child() {
-                    samples_box.remove(&c);
-                }
-                let mut failed = 0;
-                for (label, t) in thumbs {
-                    let (thumb, err) = match t {
-                        Ok(t) => (Some(t), None),
-                        Err(e) => {
-                            failed += 1;
-                            (None, Some(e))
-                        }
-                    };
-                    samples_box.append(&thumb_cell(&label, thumb, err.as_deref(), SAMPLE_PX, 12));
-                }
-                let fails = if failed > 0 {
-                    format!(" · {failed} would fail (hover for why)")
-                } else {
-                    String::new()
+                let n = plan.len();
+                let c = recipe.canvas;
+                let rest = total - n;
+                let (text, run) = match recipe.framing {
+                    Framing::Square if n == 0 => (
+                        format!("All {total} are already square. Square would write nothing."),
+                        format!("Run (0 of {total} to square)"),
+                    ),
+                    Framing::Square => (
+                        format!(
+                            "{n} of {total} would be cropped to their centre and held to {c} px, the most cropped first \u{b7} {rest} already square, left alone"
+                        ),
+                        format!("Run ({n} of {total} to square)"),
+                    ),
+                    Framing::Cap if n == 0 => (
+                        format!("All {total} are already within {c} px. Cap would write nothing."),
+                        format!("Run (0 of {total} to shrink)"),
+                    ),
+                    Framing::Cap => (
+                        format!(
+                            "{n} of {total} would be shrunk to at most {c} px, the largest first \u{b7} {rest} already within it, left alone"
+                        ),
+                        format!("Run ({n} of {total} to shrink)"),
+                    ),
+                    _ => (
+                        format!("All {total}, in run order, as the run would write them"),
+                        format!("Run ({total} file{})", if total == 1 { "" } else { "s" }),
+                    ),
                 };
-                if let (Some(over), true) = (over, square) {
-                    b_run.set_label(&format!("Run ({over} of {total} to square)"));
-                    samples_note.set_text(&if over == 0 {
-                        format!("All {total} are already square. Square would write nothing.")
-                    } else {
-                        format!(
-                            "{over} of {total} are not square and would be cropped to their centre, then held to {} px; the other {} are left alone. Shown: the first {n} that change{fails}. Preview lists all {over}.",
-                            recipe.canvas,
-                            total - over
-                        )
-                    });
-                    return;
-                }
-                if let Some(over) = over {
-                    b_run.set_label(&format!("Run ({over} of {total} to shrink)"));
-                    samples_note.set_text(&if over == 0 {
-                        format!("All {total} are already within {} px. Cap would write nothing.", recipe.canvas)
-                    } else {
-                        format!(
-                            "{over} of {total} are larger than {} px and would be shrunk; the other {} are left alone. Shown: the first {n} that change{fails}. Preview lists all {over}.",
-                            recipe.canvas,
-                            total - over
-                        )
-                    });
-                    return;
-                }
-                samples_note.set_text(&format!(
-                    "The first {n}, through the same renderer the run uses{fails}. Preview shows {PREVIEW_N}."
+                head.set_text(&text);
+                b_run.set_label(&run);
+                files_head.set_text(&format!(
+                    "Files ({n}){}",
+                    if recipe.framing.keeps_file() { " \u{b7} the ones that change" } else { "" }
                 ));
+                let items = plan
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, p)| GridItem::new(i + 1, p, &strip, recipe))
+                    .collect();
+                show_plan(items, Some(recipe));
+                main_stack.set_visible_child_name("grid");
             }
         ));
         glib::ControlFlow::Continue
@@ -2047,9 +2025,9 @@ fn list_readout(p: &Path, l: &CoverList) -> String {
     t
 }
 
-/// Fill the survey readout: a headline, and a list of what each release or
-/// folder contributes. The list is capped like the results list, and says so.
-fn show_survey(s: &Survey, what: &str, needle: &str, lbl: &Label, list: &ListBox, exp: &gtk::Expander) {
+/// Fill the survey readout: what the scope and the filter select. The files
+/// themselves are in the numbered list below it.
+fn show_survey(s: &Survey, what: &str, needle: &str, lbl: &Label) {
     let plural = |n: usize, w: &str| format!("{n} {w}{}", if n == 1 { "" } else { "s" });
     lbl.remove_css_class("error");
     if s.total == 0 {
@@ -2059,65 +2037,26 @@ fn show_survey(s: &Survey, what: &str, needle: &str, lbl: &Label, list: &ListBox
         } else {
             format!("Nothing matches \u{201c}{needle}\u{201d}. Clear the filter to take every image.")
         });
-    } else {
-        let mut t = format!("{} in {}", plural(s.total, "image"), plural(s.groups.len(), what));
-        if s.empty_roots > 0 {
-            t += &format!(" · {} matched nothing", plural(s.empty_roots, what));
-        }
-        if s.unreadable > 0 {
-            t += &format!(" · {} could not be read", plural(s.unreadable, what));
-        }
-        if s.shared_names > 0 {
-            t += &format!(
-                " · {} with two images of one name (e.g. cover.jpg + cover.png): both kept, the extension goes into the output name",
-                plural(s.shared_names, what)
-            );
-        }
-        lbl.set_text(&t);
+        return;
     }
-    while let Some(c) = list.first_child() {
-        list.remove(&c);
+    let mut t = format!("{} in {}", plural(s.total, "image"), plural(s.groups.len(), what));
+    if s.empty_roots > 0 {
+        t += &format!(" \u{b7} {} matched nothing", plural(s.empty_roots, what));
     }
-    let mut rows = 0usize;
-    let mut left = 0usize;
-    for g in &s.groups {
-        if rows >= RESULT_ROWS {
-            left += 1;
-            continue;
-        }
-        let head = Label::new(Some(&format!("{}  \u{b7}  {}", g.name, g.files.len())));
-        head.set_xalign(0.0);
-        head.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        head.set_margin_start(6);
-        list.append(&head);
-        rows += 1;
-        for f in &g.files {
-            let l = Label::new(Some(f));
-            l.set_xalign(0.0);
-            l.set_ellipsize(gtk::pango::EllipsizeMode::Start);
-            l.add_css_class("dim-label");
-            l.add_css_class("monospace");
-            l.set_margin_start(18);
-            list.append(&l);
-            rows += 1;
-        }
+    if s.unreadable > 0 {
+        t += &format!(" \u{b7} {} could not be read", plural(s.unreadable, what));
     }
-    if left > 0 {
-        let l = Label::new(Some(&format!(
-            "\u{2026} and {} more (the list caps at {RESULT_ROWS} rows; the count above is complete)",
-            plural(left, what)
-        )));
-        l.set_xalign(0.0);
-        l.add_css_class("dim-label");
-        l.set_margin_start(6);
-        list.append(&l);
+    if s.shared_names > 0 {
+        t += &format!(
+            " \u{b7} {} with two images of one name (e.g. cover.jpg + cover.png): both kept, the extension goes into the output name",
+            plural(s.shared_names, what)
+        );
     }
-    exp.set_label(Some(&format!("Files ({})", s.total)));
-    exp.set_visible(s.total > 0);
+    lbl.set_text(&t);
 }
 
-/// A thumbnail's bytes as a picture, `px` square at most.
-fn thumb_picture(t: ThumbBytes, px: i32) -> gtk::Picture {
+/// A thumbnail's bytes as a texture.
+fn thumb_texture(t: ThumbBytes) -> gtk::gdk::Texture {
     let (bytes, w, h, rowstride, has_alpha) = t;
     let pb = gdk_pixbuf::Pixbuf::from_bytes(
         &glib::Bytes::from_owned(bytes),
@@ -2128,227 +2067,222 @@ fn thumb_picture(t: ThumbBytes, px: i32) -> gtk::Picture {
         h,
         rowstride,
     );
-    let pic = gtk::Picture::for_paintable(&gtk::gdk::Texture::for_pixbuf(&pb));
-    pic.set_size_request(px, px);
-    pic
+    gtk::gdk::Texture::for_pixbuf(&pb)
 }
 
-/// Thumbnail side in the review list, px.
-const REVIEW_PX: i32 = 120;
+/// Threads rendering grid thumbnails. Each cell is a decode and a render at
+/// the full canvas size, so a few in parallel keep up with scrolling.
+const RENDER_WORKERS: usize = 4;
 
-/// Fill the review list: every file a Cap or Square run would change, the
-/// most cropped (or, under Cap, the largest) first. Walks with `walk_scope`
-/// and selects with `would_change`, so its length is the Run button's count.
-/// Rows stream in as they render; a newer Preview (`gen` moved on) stops it.
-#[allow(clippy::too_many_arguments)]
-fn start_review(
-    scope: Scope,
-    needle: String,
-    recipe: Recipe,
-    g: u64,
-    gen: Arc<std::sync::atomic::AtomicU64>,
-    list: &ListBox,
-    stack: &gtk::Stack,
-    l_prog: &Label,
-    window: &ApplicationWindow,
-) {
-    while let Some(c) = list.first_child() {
-        list.remove(&c);
-    }
-    stack.set_visible_child_name("review");
-    l_prog.set_text("reading sizes…");
-    let (tx, rx) = async_channel::unbounded::<ReviewMsg>();
-    let worker_gen = gen.clone();
-    std::thread::spawn(move || {
-        let (hits, _) = walk_scope(&scope, &needle);
-        let order = review_order(hits, recipe);
-        let _ = tx.send_blocking(ReviewMsg::Total(order.len()));
-        for (root, path) in order {
-            if worker_gen.load(Ordering::Relaxed) != g {
-                return;
+/// Where a grid cell asks for its render: (position, file).
+type RenderTx = Rc<RefCell<Option<async_channel::Sender<(u32, PathBuf)>>>>;
+
+type Shot = std::result::Result<(gtk::gdk::Texture, (i32, i32)), String>;
+
+/// One file in the Batch model: what both views show, and the grid's
+/// thumbnails once they have rendered.
+struct GridItem {
+    /// Its number, the same in the grid and in the Files list.
+    n: usize,
+    p: Planned,
+    /// The path as the survey shows it, relative to the scope.
+    rel: String,
+    /// What the run does to it, from the header.
+    words: String,
+    /// The same, short enough for a grid cell: "600×535 → 535×535".
+    short: String,
+    keeps: bool,
+    /// The render generation it belongs to; set by `show_plan`.
+    gen: u64,
+    asked: Cell<bool>,
+    /// Before and after, once rendered.
+    shots: RefCell<Option<[Shot; 2]>>,
+    /// The grid cell it is bound to, if it is on screen.
+    pic: RefCell<Option<glib::WeakRef<gtk::Picture>>>,
+    cap: RefCell<Option<glib::WeakRef<Label>>>,
+}
+
+impl GridItem {
+    fn new(n: usize, p: Planned, strip: &Path, r: Recipe) -> GridItem {
+        let words = match p.dims {
+            None => "size unreadable".to_string(),
+            Some(d) if r.framing.keeps_file() => change_words(d, out_dims(d, r)),
+            Some((w, h)) => {
+                let (ow, oh) = out_dims((w, h), r);
+                format!("{w} \u{d7} {h} \u{2192} {ow} \u{d7} {oh}")
             }
-            let name = scope.name_of(&scope.roots[root]);
-            let review = review_one(&path, recipe, REVIEW_PX);
-            if tx.send_blocking(ReviewMsg::Row { name, path, review }).is_err() {
-                return;
-            }
+        };
+        let short = match p.dims {
+            None => "size unreadable".to_string(),
+            Some(d) => short_words(d, out_dims(d, r)),
+        };
+        GridItem {
+            n,
+            short,
+            rel: p.path.strip_prefix(strip).unwrap_or(&p.path).display().to_string(),
+            words,
+            keeps: r.framing.keeps_file(),
+            p,
+            gen: 0,
+            asked: Cell::new(false),
+            shots: RefCell::new(None),
+            pic: RefCell::new(None),
+            cap: RefCell::new(None),
         }
-        let _ = tx.send_blocking(ReviewMsg::Done);
+    }
+}
+
+/// A change in a grid cell's width.
+fn short_words(from: (i32, i32), to: (i32, i32)) -> String {
+    format!("{}\u{d7}{} \u{2192} {}\u{d7}{}", from.0, from.1, to.0, to.1)
+}
+
+/// Show an item's thumbnail and words in the grid cell it is bound to, if
+/// any. Before it has rendered, the cell keeps its size and shows the words.
+fn paint_cell(it: &GridItem, before: bool) {
+    let pic = it.pic.borrow().as_ref().and_then(|w| w.upgrade());
+    let cap = it.cap.borrow().as_ref().and_then(|w| w.upgrade());
+    let (Some(pic), Some(cap)) = (pic, cap) else { return };
+    let shots = it.shots.borrow();
+    let mut words = it.words.clone();
+    let mut short = it.short.clone();
+    let mut err = None;
+    let mut paint = None;
+    if let Some([b, a]) = shots.as_ref() {
+        if let (true, Ok((_, from)), Ok((_, to))) = (it.keeps, b, a) {
+            // The rendered sizes: these follow an EXIF turn, the header's do not.
+            words = change_words(*from, *to);
+            short = short_words(*from, *to);
+        }
+        err = a.as_ref().err().or(b.as_ref().err()).cloned();
+        paint = (if before { b } else { a }).as_ref().ok().map(|(t, _)| t.clone());
+    }
+    pic.set_paintable(paint.as_ref());
+    if err.is_some() {
+        cap.set_text("would fail");
+        cap.add_css_class("error");
+    } else {
+        cap.set_text(&short);
+        cap.remove_css_class("error");
+    }
+    cap.set_tooltip_text(Some(&match &err {
+        Some(e) => format!("{}\n\n{e}", it.p.path.display()),
+        None => format!("{}\n{words}", it.p.path.display()),
+    }));
+}
+
+/// The numbered Files list: number, release, then the path and the change.
+fn files_factory() -> gtk::SignalListItemFactory {
+    let f = gtk::SignalListItemFactory::new();
+    f.connect_setup(|_, li| {
+        let li = li.downcast_ref::<gtk::ListItem>().unwrap();
+        let row = GBox::new(Orientation::Horizontal, 10);
+        row.set_margin_top(3);
+        row.set_margin_bottom(3);
+        row.set_margin_start(4);
+        row.set_margin_end(6);
+        let num = Label::new(None);
+        num.add_css_class("dim-label");
+        num.add_css_class("numeric");
+        num.set_xalign(1.0);
+        num.set_width_chars(4);
+        num.set_valign(gtk::Align::Start);
+        row.append(&num);
+        let text = GBox::new(Orientation::Vertical, 0);
+        text.set_hexpand(true);
+        let name = Label::new(None);
+        name.set_xalign(0.0);
+        name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        text.append(&name);
+        let detail = Label::new(None);
+        detail.add_css_class("dim-label");
+        detail.add_css_class("caption");
+        detail.set_xalign(0.0);
+        detail.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        text.append(&detail);
+        row.append(&text);
+        li.set_child(Some(&row));
     });
-    let verb = if recipe.framing == Framing::Square { "square" } else { "shrink" };
-    glib::spawn_future_local(clone!(
-        #[weak]
-        list,
-        #[weak]
-        l_prog,
-        #[weak]
-        window,
-        async move {
-            let (mut total, mut shown, mut failed) = (0usize, 0usize, 0usize);
-            while let Ok(msg) = rx.recv().await {
-                if gen.load(Ordering::Relaxed) != g {
-                    return;
-                }
-                match msg {
-                    ReviewMsg::Total(n) => {
-                        total = n;
-                        if n == 0 {
-                            l_prog.set_text(&format!("review: nothing to {verb}"));
-                        }
-                    }
-                    ReviewMsg::Row { name, path, review } => {
-                        shown += 1;
-                        if review.after.is_err() {
-                            failed += 1;
-                        }
-                        list.append(&review_row(&name, &path, review, &window));
-                        l_prog.set_text(&format!("review: {shown} of {total} to {verb}\u{2026}"));
-                    }
-                    ReviewMsg::Done => {
-                        let order = if verb == "square" { "most cropped first" } else { "largest first" };
-                        l_prog.set_text(&format!(
-                            "review: all {total} to {verb}, {order}{}",
-                            if failed > 0 { format!(" \u{b7} {failed} would fail") } else { String::new() }
-                        ));
-                        return;
-                    }
-                }
-            }
-        }
-    ));
+    f.connect_bind(|_, li| {
+        let li = li.downcast_ref::<gtk::ListItem>().unwrap();
+        let Some(obj) = li.item().and_downcast::<glib::BoxedAnyObject>() else { return };
+        let it = obj.borrow::<GridItem>();
+        let Some(row) = li.child().and_downcast::<GBox>() else { return };
+        let num = row.first_child().and_downcast::<Label>().unwrap();
+        let text = num.next_sibling().unwrap();
+        let name = text.first_child().and_downcast::<Label>().unwrap();
+        let detail = name.next_sibling().and_downcast::<Label>().unwrap();
+        num.set_text(&it.n.to_string());
+        name.set_text(&it.p.name);
+        let file = it.p.path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        detail.set_text(&format!("{} \u{b7} {file}", it.words));
+        row.set_tooltip_text(Some(&format!("{}\n{}", it.rel, it.words)));
+    });
+    f
 }
 
-/// One file of the review: before → after, its name, what changes, and a
-/// way to its folder for a cover that wants a hand-made crop or a new source.
-fn review_row(name: &str, path: &Path, rv: Review, window: &ApplicationWindow) -> GBox {
-    let row = GBox::new(Orientation::Horizontal, 10);
-    row.set_margin_top(4);
-    row.set_margin_bottom(4);
-    row.set_margin_start(6);
-    row.set_margin_end(6);
-    let pic = |r: &std::result::Result<(ThumbBytes, (i32, i32)), String>| -> gtk::Widget {
-        match r {
-            Ok((t, _)) => {
-                let p = thumb_picture(t.clone(), REVIEW_PX);
-                p.add_css_class("frame");
-                p.upcast()
-            }
-            Err(e) => {
-                let x = Label::new(Some("could not render"));
-                x.add_css_class("error");
-                x.set_size_request(REVIEW_PX, REVIEW_PX);
-                x.set_wrap(true);
-                x.set_tooltip_text(Some(e));
-                x.upcast()
-            }
-        }
-    };
-    row.append(&pic(&rv.before));
-    let arrow = Label::new(Some("\u{2192}"));
-    arrow.add_css_class("dim-label");
-    row.append(&arrow);
-    row.append(&pic(&rv.after));
-
-    let text = GBox::new(Orientation::Vertical, 2);
-    text.set_valign(gtk::Align::Center);
-    text.set_hexpand(true);
-    let title = Label::new(Some(name));
-    title.add_css_class("heading");
-    title.set_xalign(0.0);
-    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    text.append(&title);
-    let file = Label::new(Some(&path.display().to_string()));
-    file.add_css_class("dim-label");
-    file.add_css_class("caption");
-    file.set_xalign(0.0);
-    file.set_ellipsize(gtk::pango::EllipsizeMode::Start);
-    file.set_tooltip_text(Some(&path.display().to_string()));
-    text.append(&file);
-    let what = match (&rv.before, &rv.after) {
-        (Ok((_, from)), Ok((_, to))) => change_words(*from, *to),
-        (_, Err(e)) | (Err(e), _) => e.clone(),
-    };
-    let change = Label::new(Some(&what));
-    change.set_xalign(0.0);
-    change.set_wrap(true);
-    if rv.after.is_err() {
-        change.add_css_class("error");
-    }
-    text.append(&change);
-    row.append(&text);
-
-    let open = Button::with_label("Open folder");
-    open.set_valign(gtk::Align::Center);
-    open.set_tooltip_text(Some("Show this cover in the file manager, to crop it by hand or replace it."));
-    let f = gio::File::for_path(path);
-    open.connect_clicked(clone!(
-        #[weak]
-        window,
-        move |_| {
-            gtk::FileLauncher::new(Some(&f)).open_containing_folder(
-                Some(&window),
-                gio::Cancellable::NONE,
-                |_| {},
-            );
-        }
-    ));
-    row.append(&open);
-    row
-}
-
-/// One thumbnail with its caption, or the failure in its place — a preview
-/// that leaves out the files that would fail lies about what the run will do.
-/// Used by the Preview contact sheet and the automatic sample alike.
-fn thumb_cell(label: &str, thumb: Option<ThumbBytes>, err: Option<&str>, px: i32, chars: i32) -> GBox {
-    let cell = GBox::new(Orientation::Vertical, 2);
-    match thumb {
-        Some((bytes, w, h, rowstride, has_alpha)) => {
-            let pb = gdk_pixbuf::Pixbuf::from_bytes(
-                &glib::Bytes::from_owned(bytes),
-                gdk_pixbuf::Colorspace::Rgb,
-                has_alpha,
-                8,
-                w,
-                h,
-                rowstride,
-            );
-            let tex = gtk::gdk::Texture::for_pixbuf(&pb);
-            let pic = gtk::Picture::for_paintable(&tex);
-            pic.set_size_request(px, px);
-            pic.add_css_class("frame");
-            pic.set_tooltip_text(Some(label));
-            cell.append(&pic);
-        }
-        None => {
-            let x = Label::new(Some("render failed"));
-            x.add_css_class("error");
-            x.set_size_request(px, px);
-            x.set_wrap(true);
-            x.set_tooltip_text(err);
-            cell.append(&x);
-        }
-    }
-    // Two lines: the folder, then the file. Across a library every file is
-    // cover.png, so a single ellipsized path shows the one part that is the
-    // same everywhere and cuts the part that tells them apart.
-    let p = Path::new(label);
-    let (dir, file) = match (p.parent().filter(|d| !d.as_os_str().is_empty()), p.file_name()) {
-        (Some(d), Some(f)) => (d.display().to_string(), f.to_string_lossy().into_owned()),
-        _ => (label.to_string(), String::new()),
-    };
-    for (text, class) in [(dir, "dim-label"), (file, "caption")] {
-        if text.is_empty() {
-            continue;
-        }
-        let cap = Label::new(Some(&text));
+/// The grid: each cell its thumbnail, number and release, and the change.
+/// A cell asks for its render when it is first bound, so only the files you
+/// scroll to are decoded.
+fn grid_factory(
+    before: Rc<Cell<bool>>,
+    render_gen: Arc<std::sync::atomic::AtomicU64>,
+    render_tx: RenderTx,
+) -> gtk::SignalListItemFactory {
+    let f = gtk::SignalListItemFactory::new();
+    f.connect_setup(|_, li| {
+        let li = li.downcast_ref::<gtk::ListItem>().unwrap();
+        let cell = GBox::new(Orientation::Vertical, 2);
+        cell.set_margin_top(4);
+        cell.set_margin_bottom(4);
+        cell.set_margin_start(4);
+        cell.set_margin_end(4);
+        let pic = gtk::Picture::new();
+        pic.set_size_request(GRID_PX, GRID_PX);
+        pic.set_content_fit(gtk::ContentFit::Contain);
+        pic.add_css_class("frame");
+        cell.append(&pic);
+        let title = Label::new(None);
+        title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        title.set_max_width_chars(20);
+        title.add_css_class("caption");
+        cell.append(&title);
+        let cap = Label::new(None);
+        cap.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        cap.set_max_width_chars(24);
         cap.add_css_class("dim-label");
-        cap.add_css_class(class);
-        cap.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-        cap.set_max_width_chars(chars);
-        cap.set_tooltip_text(Some(label));
+        cap.add_css_class("caption");
         cell.append(&cap);
-    }
-    cell
+        li.set_child(Some(&cell));
+    });
+    f.connect_bind(move |_, li| {
+        let li = li.downcast_ref::<gtk::ListItem>().unwrap();
+        let Some(obj) = li.item().and_downcast::<glib::BoxedAnyObject>() else { return };
+        let it = obj.borrow::<GridItem>();
+        let Some(cell) = li.child().and_downcast::<GBox>() else { return };
+        let pic = cell.first_child().and_downcast::<gtk::Picture>().unwrap();
+        let title = pic.next_sibling().and_downcast::<Label>().unwrap();
+        let cap = title.next_sibling().and_downcast::<Label>().unwrap();
+        title.set_text(&format!("{}  \u{b7}  {}", it.n, it.p.name));
+        title.set_tooltip_text(Some(&it.p.name));
+        *it.pic.borrow_mut() = Some(pic.downgrade());
+        *it.cap.borrow_mut() = Some(cap.downgrade());
+        if it.shots.borrow().is_none() && !it.asked.get() && it.gen == render_gen.load(Ordering::Relaxed) {
+            if let Some(tx) = render_tx.borrow().as_ref() {
+                it.asked.set(tx.try_send((li.position(), it.p.path.clone())).is_ok());
+            }
+        }
+        paint_cell(&it, before.get());
+    });
+    f.connect_unbind(|_, li| {
+        let li = li.downcast_ref::<gtk::ListItem>().unwrap();
+        if let Some(obj) = li.item().and_downcast::<glib::BoxedAnyObject>() {
+            let it = obj.borrow::<GridItem>();
+            *it.pic.borrow_mut() = None;
+            *it.cap.borrow_mut() = None;
+        }
+    });
+    f
 }
 
 /// Which of the two the big canvas is showing. The right rail flips between the
@@ -4069,7 +4003,7 @@ const APP_CSS: &str = "
 
 fn install_css() {
     let p = gtk::CssProvider::new();
-    p.load_from_data(APP_CSS); // load_from_string is 4.12; we target v4_10
+    p.load_from_string(APP_CSS);
     if let Some(d) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &d,
@@ -4913,7 +4847,7 @@ fn build_ui(app: &Application) {
 
     // CSS
     let provider = gtk::CssProvider::new();
-    provider.load_from_data(
+    provider.load_from_string(
         ".code-display { font-family: monospace; font-size: 18px; padding: 4px 8px; }
          .swatch { border-radius: 8px; }",
     );

@@ -518,25 +518,24 @@ pub(crate) struct Survey {
     /// Output names two sources would share (`cover.jpg` + `cover.png`).
     /// The run keeps them apart by extension; the survey says so up front.
     pub(crate) shared_names: usize,
-    /// The first files in RUN order, for the automatic sample — so the sample
-    /// is literally what a run starts with.
-    pub(crate) first: Vec<PathBuf>,
     /// Every file in run order. Cap reads their headers to say how many it
     /// would actually change.
     pub(crate) files: Vec<PathBuf>,
+    /// The release (or folder) each of `files` belongs to, by index.
+    pub(crate) names: Vec<String>,
 }
 
-pub(crate) fn survey_batch(scope: &Scope, needle: &str, first_n: usize) -> Survey {
+pub(crate) fn survey_batch(scope: &Scope, needle: &str) -> Survey {
     let (hits, errors) = walk_scope(scope, needle);
     let mut by_root: Vec<Vec<String>> = vec![Vec::new(); scope.roots.len()];
-    let mut all: Vec<&PathBuf> = Vec::with_capacity(hits.len());
+    let mut all: Vec<(&PathBuf, usize)> = Vec::with_capacity(hits.len());
     let rels: Vec<PathBuf> = hits
         .iter()
         .map(|(_, f)| f.strip_prefix(&scope.strip).unwrap_or(f).to_path_buf())
         .collect();
     for (i, f) in &hits {
         by_root[*i].push(f.strip_prefix(&scope.strip).unwrap_or(f).display().to_string());
-        all.push(f);
+        all.push((f, *i));
     }
     all.sort();
     let unreadable = errors.len();
@@ -561,8 +560,8 @@ pub(crate) fn survey_batch(scope: &Scope, needle: &str, first_n: usize) -> Surve
         empty_roots,
         unreadable,
         shared_names: shared_names(&rels),
-        first: all.iter().take(first_n).map(|p| (*p).clone()).collect(),
-        files: all.into_iter().cloned().collect(),
+        names: all.iter().map(|(_, i)| scope.name_of(&scope.roots[*i])).collect(),
+        files: all.into_iter().map(|(f, _)| f.clone()).collect(),
     }
 }
 
@@ -800,7 +799,10 @@ pub(crate) fn would_change(f: &Path, r: Recipe) -> bool {
     }
 }
 
-/// `cap_survey` for either framing that leaves files alone.
+/// `cap_survey` for either framing that leaves files alone. The app counts
+/// with `plan_items` now; this stays as the tests' independent tally of the
+/// same `would_change`, which `plan_items` must agree with.
+#[cfg(test)]
 pub(crate) fn change_survey(files: &[PathBuf], r: Recipe, first_n: usize) -> (usize, Vec<PathBuf>) {
     let mut over = 0;
     let mut first = Vec::new();
@@ -1016,31 +1018,13 @@ pub(crate) enum BatchMsg {
     },
 }
 
-/// How many outputs a Preview renders. A contact sheet is a SAMPLE you eyeball to
-/// catch "my recipe is wrong" before it touches 500 files — not the whole run.
-pub(crate) const PREVIEW_N: usize = 12;
-
-/// Thumbnail side, px. Big enough to see a bad crop or a wrong corner fill.
-pub(crate) const PREVIEW_PX: i32 = 132;
-
-/// How many outputs render themselves, unasked, whenever the scope or the
-/// recipe settles. Four, not twelve, because it re-runs on every change — and
-/// it exists because a preview you must press is one you can forget to press,
-/// which is how a folder of covers comes out as discs.
-pub(crate) const SAMPLE_N: usize = 4;
-
-/// Sample thumbnail side, px.
-pub(crate) const SAMPLE_PX: i32 = 88;
+/// Thumbnail side in the Batch grid, px. Big enough to see a bad crop or a
+/// wrong corner fill.
+pub(crate) const GRID_PX: i32 = 150;
 
 /// A thumbnail's raw parts: `(rgba, w, h, rowstride, has_alpha)`. Pixbuf is
 /// `!Send`; these bytes are, so this is what crosses back from a worker.
 pub(crate) type ThumbBytes = (Vec<u8>, i32, i32, i32, bool);
-
-/// Render one file through the recipe and shrink it to a `px` thumbnail —
-/// through `batch_render`, the same function a run writes from.
-pub(crate) fn render_thumb(src: &Path, r: Recipe, px: i32) -> Result<ThumbBytes> {
-    thumb_of(&batch_render(src, r)?, px)
-}
 
 /// Shrink a pixbuf to fit a `px` square, as Send-able bytes.
 fn thumb_of(full: &gdk_pixbuf::Pixbuf, px: i32) -> Result<ThumbBytes> {
@@ -1130,28 +1114,50 @@ pub(crate) fn change_words(from: (i32, i32), to: (i32, i32)) -> String {
     t
 }
 
-/// The review list on its way back from the worker, one file at a time.
-pub(crate) enum ReviewMsg {
-    Total(usize),
-    Row { name: String, path: PathBuf, review: Review },
-    Done,
+/// One file in the Batch grid and the numbered Files list.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Planned {
+    /// The release (or folder) it belongs to.
+    pub(crate) name: String,
+    pub(crate) path: PathBuf,
+    /// From the header; `None` when it cannot be read.
+    pub(crate) dims: Option<(i32, i32)>,
 }
 
-/// A rendered thumbnail on its way back from the worker. Pixbuf is `!Send`, so it
-/// cannot cross the thread — the raw RGBA bytes (which ARE Send) do, and the main
-/// thread rebuilds the pixbuf. Rendering itself is fine off-thread: it is pure
-/// image data, never GTK, exactly as the real run already does.
-pub(crate) enum PreviewMsg {
-    Total(usize),
-    Thumb {
-        label: String,
-        /// `(rgba, w, h, rowstride, has_alpha)` on success; `None` with a reason
-        /// on failure — a preview must show the failures too, or it lies about
-        /// what the run will do.
-        thumb: Option<ThumbBytes>,
-        err: Option<String>,
-    },
-    Done,
+/// What the grid and the Files list show, in the order they show it: under
+/// Cap and Square only the files the run would change (`review_order`: the
+/// most cropped or the largest first), otherwise every file in run order.
+/// Both views read this one list, so their numbers are the same numbers, and
+/// its length under Cap / Square is `change_survey`'s count.
+pub(crate) fn plan_items(files: &[PathBuf], names: &[String], r: Recipe) -> Vec<Planned> {
+    let picked: Vec<(usize, PathBuf)> = if r.framing.keeps_file() {
+        review_order(files.iter().cloned().enumerate().collect(), r)
+    } else {
+        files.iter().cloned().enumerate().collect()
+    };
+    picked
+        .into_iter()
+        .map(|(i, path)| Planned {
+            name: names.get(i).cloned().unwrap_or_default(),
+            dims: image_dims(&path),
+            path,
+        })
+        .collect()
+}
+
+/// The size the run writes for a source of `src` pixels, as `batch_render`
+/// decides it. From the header, so it ignores an EXIF quarter turn; the grid
+/// shows the rendered size once it has one.
+pub(crate) fn out_dims(src: (i32, i32), r: Recipe) -> (i32, i32) {
+    let (w, h) = src;
+    match r.framing {
+        Framing::Cover | Framing::Fit => (r.canvas, r.canvas),
+        Framing::Cap => cap_size(w, h, r.canvas).unwrap_or((w, h)),
+        Framing::Square => {
+            let s = w.min(h).min(r.canvas);
+            (s, s)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1433,7 +1439,7 @@ mod batch_tests {
         for f in ["cover.jpg", "cover.png", "back.png"] {
             fs::write(d.join(f), b"x").unwrap();
         }
-        let s = survey_batch(&Scope::folder(root), "", 4);
+        let s = survey_batch(&Scope::folder(root), "");
         assert_eq!((s.total, s.shared_names), (3, 1));
     }
 
@@ -1496,8 +1502,8 @@ mod batch_tests {
         let r = Recipe { canvas: 600, framing: Framing::Cover, disc: Some(OuterFill::Alpha) };
         let full = batch_render(src, r).unwrap();
         assert_eq!((full.width(), full.height()), (600, 600));
-        let t = full.scale_simple(PREVIEW_PX, PREVIEW_PX, gdk_pixbuf::InterpType::Bilinear).unwrap();
-        assert_eq!((t.width(), t.height()), (PREVIEW_PX, PREVIEW_PX));
+        let t = full.scale_simple(GRID_PX, GRID_PX, gdk_pixbuf::InterpType::Bilinear).unwrap();
+        assert_eq!((t.width(), t.height()), (GRID_PX, GRID_PX));
         // Alpha corner present.
         assert!(t.has_alpha());
     }
@@ -1663,7 +1669,7 @@ mod batch_tests {
         }
         let scope = manifest_scope(&root);
 
-        let all = survey_batch(&scope, "", 4);
+        let all = survey_batch(&scope, "");
         assert_eq!(all.total, 3);
         assert_eq!(all.groups.len(), 2, "the release with only a .txt is not a group");
         assert_eq!(all.empty_roots, 1, "but it is counted, because 'nothing matched' is news");
@@ -1673,15 +1679,16 @@ mod batch_tests {
         assert_eq!(names, ["Lifted \u{2014} Trellis", "Mr.Oizo \u{2014} Lambs Anger"]);
         assert_eq!(all.groups[0].files, ["Lifted/Trellis/cover.jpg"]);
 
-        let covers = survey_batch(&scope, "cover", 4);
+        let covers = survey_batch(&scope, "cover");
         assert_eq!(covers.total, 2);
         assert!(covers.groups.iter().all(|g| g.files.iter().all(|f| f.ends_with("cover.jpg"))));
 
         // The survey and the run must agree, or the count on the button is a lie.
         assert_eq!(covers.total, find_in_scope(&scope, "cover").0.len());
         assert_eq!(all.total, find_in_scope(&scope, "").0.len());
-        // And the sample is what a run starts with, in run order.
-        assert_eq!(all.first, find_in_scope(&scope, "").0[..3]);
+        // Files are in run order, each named by the release it came from.
+        assert_eq!(all.files, find_in_scope(&scope, "").0);
+        assert_eq!(all.names.len(), all.files.len());
     }
 
     #[test]
@@ -1690,7 +1697,7 @@ mod batch_tests {
         let d = root.join("Artist/Release");
         fs::create_dir_all(&d).unwrap();
         fs::write(d.join("cover.png"), b"x").unwrap();
-        let s = survey_batch(&Scope::folder(root.clone()), "", 4);
+        let s = survey_batch(&Scope::folder(root.clone()), "");
         assert_eq!(s.total, 1);
         assert_eq!(s.groups.len(), 1);
         assert_eq!(s.groups[0].files, ["Artist/Release/cover.png"]);
@@ -1710,7 +1717,7 @@ mod batch_tests {
             names: HashMap::new(),
             only: HashMap::new(),
         };
-        let s = survey_batch(&scope, "", 4);
+        let s = survey_batch(&scope, "");
         assert_eq!(s.total, 1, "the count must match what a run writes");
         assert_eq!(s.total, find_in_scope(&scope, "").0.len());
         assert_eq!(s.empty_roots, 1, "the inner root's only file went to the outer one");
@@ -1720,7 +1727,7 @@ mod batch_tests {
     fn an_unreadable_release_is_reported_not_counted_as_empty() {
         let root = tmpdir("survey-missing");
         let scope = manifest_scope(&root); // none of the three dirs exist
-        let s = survey_batch(&scope, "", 4);
+        let s = survey_batch(&scope, "");
         assert_eq!((s.total, s.empty_roots, s.unreadable), (0, 0, 3));
         assert_eq!(find_in_scope(&scope, "").1.len(), 3, "a run reports them too");
     }
@@ -1823,7 +1830,7 @@ relative/folder\t-\t-
             g = gone.display()
         );
         let scope = Scope::list(&parse_cover_list(&text), Some("square"));
-        let s = survey_batch(&scope, "cover", 4);
+        let s = survey_batch(&scope, "cover");
         assert_eq!(s.total, 1, "the back cover is never taken");
         assert_eq!(s.files, [rel.join("cover.jpg")]);
         assert_eq!(s.unreadable, 1, "a named file that is missing is counted, not hidden");
@@ -1844,7 +1851,26 @@ relative/folder\t-\t-
         let order = review_order(hits.clone(), r);
         let names: Vec<_> = order.iter().map(|(_, f)| f.file_name().unwrap().to_owned()).collect();
         assert_eq!(names, ["tall.png", "insert.png"], "square files are left out; the worst crop leads");
-        assert_eq!(order.len(), change_survey(&hits.iter().map(|h| h.1.clone()).collect::<Vec<_>>(), r, 0).0);
+        let files: Vec<PathBuf> = hits.iter().map(|h| h.1.clone()).collect();
+        assert_eq!(order.len(), change_survey(&files, r, 0).0);
+
+        // The grid's list is that order, named, with the header sizes; and
+        // the size it promises is the one the run writes.
+        let names = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let items = plan_items(&files, &names, r);
+        let got: Vec<_> = items.iter().map(|p| (p.name.as_str(), p.dims)).collect();
+        assert_eq!(got, [("C", Some((300, 600))), ("A", Some((600, 535)))]);
+        for p in &items {
+            let real = batch_render(&p.path, r).unwrap();
+            assert_eq!(out_dims(p.dims.unwrap(), r), (real.width(), real.height()));
+        }
+        let big = Recipe { canvas: 400, ..r };
+        assert_eq!(out_dims((1000, 800), big), (400, 400));
+        let cap = Recipe { framing: Framing::Cap, ..big };
+        assert_eq!(out_dims((1000, 800), cap), cap_size(1000, 800, 400).unwrap());
+        // Cover / Fit take every file, in run order.
+        let all = plan_items(&files, &names, Recipe { framing: Framing::Cover, ..r });
+        assert_eq!(all.iter().map(|p| p.path.clone()).collect::<Vec<_>>(), files);
 
         // The sizes it shows are the ones the run writes.
         let rv = review_one(&base.join("insert.png"), r, 64);
@@ -1907,7 +1933,7 @@ relative/folder\t-\t-
         for f in [Framing::Square, Framing::Cap] {
             let r = Recipe { canvas: 600, framing: f, disc: None };
             let scope = Scope::list(&l, f.job());
-            let s = survey_batch(&scope, "cover", 4);
+            let s = survey_batch(&scope, "cover");
             let (change, _) = change_survey(&s.files, r, 4);
             println!(
                 "{f:?}: {} lines, {} files, {} unreadable, {change} would change; not in this run: {}",
@@ -1928,6 +1954,7 @@ relative/folder\t-\t-
                 }
             }
             assert_eq!(written, change, "{f:?}: the survey and the dry run disagree");
+            assert_eq!(plan_items(&s.files, &s.names, r).len(), change, "{f:?}: the grid lists another set");
         }
     }
 }
