@@ -11,6 +11,8 @@ to diverge. Its version numbers are independent of these.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-11-19
+
 ### Removed
 - **Preview, its twelve-thumbnail sheet and the four automatic samples.** The
   grid replaces all three: it is always current and shows every file.
@@ -105,7 +107,7 @@ to diverge. Its version numbers are independent of these.
   square of its shorter side, taken from the centre, then shrinks it to the
   size if it is still larger (area averaging, as Cap). It keeps the file's
   name and format (JPEG stays JPEG at quality 92) and writes nothing for an
-  image that is already square. The Run button, the samples and the dry run
+  image that is already square. The Run button, the grid and the dry run
   say how many it would change ("Run (247 of 247 to square)").
 
 ## [0.3.0] — 2026-11-13
@@ -220,7 +222,8 @@ became installable from a release rather than only from source.
   a Preview contact sheet and a dry run. It never writes over the source.
 - Save as PNG, or overwrite the original PNG in place.
 
-[Unreleased]: https://github.com/xjmzx/ncover/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/xjmzx/ncover/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/xjmzx/ncover/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/xjmzx/ncover/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/xjmzx/ncover/releases/tag/v0.2.0
 [0.1.1]: https://github.com/xjmzx/ncover/releases/tag/v0.1.1
