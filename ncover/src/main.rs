@@ -989,7 +989,7 @@ fn build_batch(
     let row_go = GBox::new(Orientation::Horizontal, 6);
     let b_preview = Button::with_label("Preview");
     b_preview.set_tooltip_text(Some(
-        "Render the first few outputs and show them as thumbnails — SEE what the recipe does before it writes anything.",
+        "Render the first few outputs and show them as thumbnails — SEE what the recipe does before it writes anything.\n\nUnder Cap or Square it lists EVERY file the run would change instead, before and after with the sizes, the most cropped (or largest) first.",
     ));
     let b_dry = Button::with_label("Dry run");
     b_dry.set_tooltip_text(Some(
@@ -1023,6 +1023,24 @@ fn build_batch(
     preview_scroll.set_child(Some(&preview_flow));
     preview_scroll.set_visible(false);
     body.append(&preview_scroll);
+
+    // The review list: under Cap or Square, Preview lists EVERY file the run
+    // would change, before and after, with the sizes. Twelve thumbnails are a
+    // sample; a list of 245 crops is something you can check one by one.
+    let review_list = ListBox::new();
+    review_list.set_selection_mode(gtk::SelectionMode::None);
+    review_list.add_css_class("boxed-list");
+    let review_scroll = gtk::ScrolledWindow::new();
+    review_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    review_scroll.set_min_content_height(260);
+    review_scroll.set_max_content_height(620);
+    review_scroll.set_propagate_natural_height(true);
+    review_scroll.set_child(Some(&review_list));
+    review_scroll.set_visible(false);
+    body.append(&review_scroll);
+    // Bumped by every Preview, so a review still rendering stops when a new
+    // one starts instead of appending to it.
+    let review_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     let results = ListBox::new();
     results.set_selection_mode(gtk::SelectionMode::None);
@@ -1543,6 +1561,10 @@ fn build_batch(
         let preview_scroll = preview_scroll.clone();
         let l_prog = l_prog.clone();
         let b_preview = b_preview.clone();
+        let review_list = review_list.clone();
+        let review_scroll = review_scroll.clone();
+        let review_gen = review_gen.clone();
+        let window = window.clone();
         Rc::new(move || {
             let Some(scope) = resolve_scope() else { return };
             let Some(recipe) = resolve_recipe() else { return };
@@ -1551,6 +1573,23 @@ fn build_batch(
             while let Some(c) = preview_flow.first_child() {
                 preview_flow.remove(&c);
             }
+            let g = review_gen.fetch_add(1, Ordering::Relaxed) + 1;
+            if recipe.framing.keeps_file() {
+                preview_scroll.set_visible(false);
+                start_review(
+                    scope,
+                    needle,
+                    recipe,
+                    g,
+                    review_gen.clone(),
+                    &review_list,
+                    &review_scroll,
+                    &l_prog,
+                    &window,
+                );
+                return;
+            }
+            review_scroll.set_visible(false);
             preview_scroll.set_visible(true);
             l_prog.set_text("rendering preview…");
             b_preview.set_sensitive(false);
@@ -1906,7 +1945,7 @@ fn build_batch(
                         format!("All {total} are already square. Square would write nothing.")
                     } else {
                         format!(
-                            "{over} of {total} are not square and would be cropped to their centre, then held to {} px; the other {} are left alone. Shown: the first {n} that change{fails}.",
+                            "{over} of {total} are not square and would be cropped to their centre, then held to {} px; the other {} are left alone. Shown: the first {n} that change{fails}. Preview lists all {over}.",
                             recipe.canvas,
                             total - over
                         )
@@ -1919,7 +1958,7 @@ fn build_batch(
                         format!("All {total} are already within {} px. Cap would write nothing.", recipe.canvas)
                     } else {
                         format!(
-                            "{over} of {total} are larger than {} px and would be shrunk; the other {} are left alone. Shown: the first {n} that change{fails}.",
+                            "{over} of {total} are larger than {} px and would be shrunk; the other {} are left alone. Shown: the first {n} that change{fails}. Preview lists all {over}.",
                             recipe.canvas,
                             total - over
                         )
@@ -2024,6 +2063,186 @@ fn show_survey(s: &Survey, what: &str, needle: &str, lbl: &Label, list: &ListBox
     }
     exp.set_label(Some(&format!("Files ({})", s.total)));
     exp.set_visible(s.total > 0);
+}
+
+/// A thumbnail's bytes as a picture, `px` square at most.
+fn thumb_picture(t: ThumbBytes, px: i32) -> gtk::Picture {
+    let (bytes, w, h, rowstride, has_alpha) = t;
+    let pb = gdk_pixbuf::Pixbuf::from_bytes(
+        &glib::Bytes::from_owned(bytes),
+        gdk_pixbuf::Colorspace::Rgb,
+        has_alpha,
+        8,
+        w,
+        h,
+        rowstride,
+    );
+    let pic = gtk::Picture::for_paintable(&gtk::gdk::Texture::for_pixbuf(&pb));
+    pic.set_size_request(px, px);
+    pic
+}
+
+/// Thumbnail side in the review list, px.
+const REVIEW_PX: i32 = 120;
+
+/// Fill the review list: every file a Cap or Square run would change, the
+/// most cropped (or, under Cap, the largest) first. Walks with `walk_scope`
+/// and selects with `would_change`, so its length is the Run button's count.
+/// Rows stream in as they render; a newer Preview (`gen` moved on) stops it.
+#[allow(clippy::too_many_arguments)]
+fn start_review(
+    scope: Scope,
+    needle: String,
+    recipe: Recipe,
+    g: u64,
+    gen: Arc<std::sync::atomic::AtomicU64>,
+    list: &ListBox,
+    scroll: &gtk::ScrolledWindow,
+    l_prog: &Label,
+    window: &ApplicationWindow,
+) {
+    while let Some(c) = list.first_child() {
+        list.remove(&c);
+    }
+    scroll.set_visible(true);
+    l_prog.set_text("reading sizes…");
+    let (tx, rx) = async_channel::unbounded::<ReviewMsg>();
+    let worker_gen = gen.clone();
+    std::thread::spawn(move || {
+        let (hits, _) = walk_scope(&scope, &needle);
+        let order = review_order(hits, recipe);
+        let _ = tx.send_blocking(ReviewMsg::Total(order.len()));
+        for (root, path) in order {
+            if worker_gen.load(Ordering::Relaxed) != g {
+                return;
+            }
+            let name = scope.name_of(&scope.roots[root]);
+            let review = review_one(&path, recipe, REVIEW_PX);
+            if tx.send_blocking(ReviewMsg::Row { name, path, review }).is_err() {
+                return;
+            }
+        }
+        let _ = tx.send_blocking(ReviewMsg::Done);
+    });
+    let verb = if recipe.framing == Framing::Square { "square" } else { "shrink" };
+    glib::spawn_future_local(clone!(
+        #[weak]
+        list,
+        #[weak]
+        l_prog,
+        #[weak]
+        window,
+        async move {
+            let (mut total, mut shown, mut failed) = (0usize, 0usize, 0usize);
+            while let Ok(msg) = rx.recv().await {
+                if gen.load(Ordering::Relaxed) != g {
+                    return;
+                }
+                match msg {
+                    ReviewMsg::Total(n) => {
+                        total = n;
+                        if n == 0 {
+                            l_prog.set_text(&format!("review: nothing to {verb}"));
+                        }
+                    }
+                    ReviewMsg::Row { name, path, review } => {
+                        shown += 1;
+                        if review.after.is_err() {
+                            failed += 1;
+                        }
+                        list.append(&review_row(&name, &path, review, &window));
+                        l_prog.set_text(&format!("review: {shown} of {total} to {verb}\u{2026}"));
+                    }
+                    ReviewMsg::Done => {
+                        let order = if verb == "square" { "most cropped first" } else { "largest first" };
+                        l_prog.set_text(&format!(
+                            "review: all {total} to {verb}, {order}{}",
+                            if failed > 0 { format!(" \u{b7} {failed} would fail") } else { String::new() }
+                        ));
+                        return;
+                    }
+                }
+            }
+        }
+    ));
+}
+
+/// One file of the review: before → after, its name, what changes, and a
+/// way to its folder for a cover that wants a hand-made crop or a new source.
+fn review_row(name: &str, path: &Path, rv: Review, window: &ApplicationWindow) -> GBox {
+    let row = GBox::new(Orientation::Horizontal, 10);
+    row.set_margin_top(4);
+    row.set_margin_bottom(4);
+    row.set_margin_start(6);
+    row.set_margin_end(6);
+    let pic = |r: &std::result::Result<(ThumbBytes, (i32, i32)), String>| -> gtk::Widget {
+        match r {
+            Ok((t, _)) => {
+                let p = thumb_picture(t.clone(), REVIEW_PX);
+                p.add_css_class("frame");
+                p.upcast()
+            }
+            Err(e) => {
+                let x = Label::new(Some("could not render"));
+                x.add_css_class("error");
+                x.set_size_request(REVIEW_PX, REVIEW_PX);
+                x.set_wrap(true);
+                x.set_tooltip_text(Some(e));
+                x.upcast()
+            }
+        }
+    };
+    row.append(&pic(&rv.before));
+    let arrow = Label::new(Some("\u{2192}"));
+    arrow.add_css_class("dim-label");
+    row.append(&arrow);
+    row.append(&pic(&rv.after));
+
+    let text = GBox::new(Orientation::Vertical, 2);
+    text.set_valign(gtk::Align::Center);
+    text.set_hexpand(true);
+    let title = Label::new(Some(name));
+    title.add_css_class("heading");
+    title.set_xalign(0.0);
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    text.append(&title);
+    let file = Label::new(Some(&path.display().to_string()));
+    file.add_css_class("dim-label");
+    file.add_css_class("caption");
+    file.set_xalign(0.0);
+    file.set_ellipsize(gtk::pango::EllipsizeMode::Start);
+    file.set_tooltip_text(Some(&path.display().to_string()));
+    text.append(&file);
+    let what = match (&rv.before, &rv.after) {
+        (Ok((_, from)), Ok((_, to))) => change_words(*from, *to),
+        (_, Err(e)) | (Err(e), _) => e.clone(),
+    };
+    let change = Label::new(Some(&what));
+    change.set_xalign(0.0);
+    change.set_wrap(true);
+    if rv.after.is_err() {
+        change.add_css_class("error");
+    }
+    text.append(&change);
+    row.append(&text);
+
+    let open = Button::with_label("Open folder");
+    open.set_valign(gtk::Align::Center);
+    open.set_tooltip_text(Some("Show this cover in the file manager, to crop it by hand or replace it."));
+    let f = gio::File::for_path(path);
+    open.connect_clicked(clone!(
+        #[weak]
+        window,
+        move |_| {
+            gtk::FileLauncher::new(Some(&f)).open_containing_folder(
+                Some(&window),
+                gio::Cancellable::NONE,
+                |_| {},
+            );
+        }
+    ));
+    row.append(&open);
+    row
 }
 
 /// One thumbnail with its caption, or the failure in its place — a preview

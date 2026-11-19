@@ -1039,7 +1039,11 @@ pub(crate) type ThumbBytes = (Vec<u8>, i32, i32, i32, bool);
 /// Render one file through the recipe and shrink it to a `px` thumbnail —
 /// through `batch_render`, the same function a run writes from.
 pub(crate) fn render_thumb(src: &Path, r: Recipe, px: i32) -> Result<ThumbBytes> {
-    let full = batch_render(src, r)?;
+    thumb_of(&batch_render(src, r)?, px)
+}
+
+/// Shrink a pixbuf to fit a `px` square, as Send-able bytes.
+fn thumb_of(full: &gdk_pixbuf::Pixbuf, px: i32) -> Result<ThumbBytes> {
     // Fit, not stretch: a Cap output keeps its own shape.
     let k = px as f64 / full.width().max(full.height()) as f64;
     let (tw, th) = (
@@ -1050,6 +1054,87 @@ pub(crate) fn render_thumb(src: &Path, r: Recipe, px: i32) -> Result<ThumbBytes>
         .scale_simple(tw, th, gdk_pixbuf::InterpType::Bilinear)
         .context("could not scale the thumbnail")?;
     Ok((unsafe { t.pixels() }.to_vec(), t.width(), t.height(), t.rowstride(), t.has_alpha()))
+}
+
+// ---------- the review list: every file a Cap or Square run would change ----------
+
+/// How much of an image a centre crop to a square throws away, 0.0 – 1.0.
+pub(crate) fn trim_share(w: i32, h: i32) -> f64 {
+    let (long, short) = (w.max(h), w.min(h));
+    if long <= 0 {
+        return 0.0;
+    }
+    1.0 - short as f64 / long as f64
+}
+
+/// The files a Cap or Square run would write, in the order worth reviewing
+/// them: under Square the most cropped first, under Cap the largest first.
+/// Sizes come from headers, so ordering a few hundred covers is instant. A
+/// file whose header cannot be read goes first: the run will open it
+/// properly, and the review is where you find out how that goes.
+pub(crate) fn review_order(hits: Vec<(usize, PathBuf)>, r: Recipe) -> Vec<(usize, PathBuf)> {
+    let mut v: Vec<(f64, (usize, PathBuf))> = hits
+        .into_iter()
+        .filter(|(_, f)| would_change(f, r))
+        .map(|h| {
+            let key = match image_dims(&h.1) {
+                None => f64::INFINITY,
+                Some((w, h)) if r.framing == Framing::Square => trim_share(w, h),
+                Some((w, h)) => w.max(h) as f64,
+            };
+            (key, h)
+        })
+        .collect();
+    // Stable, so equal keys keep the run's order.
+    v.sort_by(|a, b| b.0.total_cmp(&a.0));
+    v.into_iter().map(|(_, h)| h).collect()
+}
+
+/// One file of the review: the source as a viewer shows it, the output as the
+/// run would write it, both with their sizes. The output goes through
+/// `batch_render`, the function the run writes from.
+pub(crate) struct Review {
+    pub(crate) before: std::result::Result<(ThumbBytes, (i32, i32)), String>,
+    pub(crate) after: std::result::Result<(ThumbBytes, (i32, i32)), String>,
+}
+
+pub(crate) fn review_one(src: &Path, r: Recipe, px: i32) -> Review {
+    let before = gdk_pixbuf::Pixbuf::from_file(src)
+        .context("could not read the image")
+        .and_then(|pb| {
+            let pb = pb.apply_embedded_orientation().unwrap_or(pb);
+            Ok((thumb_of(&pb, px)?, (pb.width(), pb.height())))
+        })
+        .map_err(|e| format!("{e:#}"));
+    let after = batch_render(src, r)
+        .and_then(|pb| Ok((thumb_of(&pb, px)?, (pb.width(), pb.height()))))
+        .map_err(|e| format!("{e:#}"));
+    Review { before, after }
+}
+
+/// What a run does to one file, in words: "600 × 533 → 533 × 533 · 67 px off
+/// the sides (11%)".
+pub(crate) fn change_words(from: (i32, i32), to: (i32, i32)) -> String {
+    let (w, h) = from;
+    let mut t = format!("{w} \u{d7} {h} \u{2192} {} \u{d7} {}", to.0, to.1);
+    if w != h && to.0 == to.1 {
+        let where_ = if w > h { "the sides" } else { "top and bottom" };
+        t += &format!(
+            " \u{b7} {} px off {where_} ({:.0}%)",
+            (w - h).abs(),
+            trim_share(w, h) * 100.0
+        );
+    } else if to != from {
+        t += &format!(" \u{b7} shrunk to {:.0}%", to.0 as f64 / w.max(1) as f64 * 100.0);
+    }
+    t
+}
+
+/// The review list on its way back from the worker, one file at a time.
+pub(crate) enum ReviewMsg {
+    Total(usize),
+    Row { name: String, path: PathBuf, review: Review },
+    Done,
 }
 
 /// A rendered thumbnail on its way back from the worker. Pixbuf is `!Send`, so it
@@ -1745,6 +1830,29 @@ relative/folder\t-\t-
         assert_eq!(s.total, find_in_scope(&scope, "cover").0.len());
         // Both folders sit under Artist, so that is the mirror prefix.
         assert_eq!(s.groups[0].files, ["Release/cover.jpg"], "mirrored under the common parent");
+    }
+
+    #[test]
+    fn the_review_lists_only_what_changes_most_cropped_first() {
+        let base = tmpdir("review");
+        solid(600, 535, false, 0x808080ff).savev(base.join("insert.png"), "png", &[]).unwrap();
+        solid(500, 500, false, 0x808080ff).savev(base.join("square.png"), "png", &[]).unwrap();
+        solid(300, 600, false, 0x808080ff).savev(base.join("tall.png"), "png", &[]).unwrap();
+        let hits: Vec<(usize, PathBuf)> =
+            ["insert.png", "square.png", "tall.png"].iter().map(|f| (0, base.join(f))).collect();
+        let r = Recipe { canvas: 600, framing: Framing::Square, disc: None };
+        let order = review_order(hits.clone(), r);
+        let names: Vec<_> = order.iter().map(|(_, f)| f.file_name().unwrap().to_owned()).collect();
+        assert_eq!(names, ["tall.png", "insert.png"], "square files are left out; the worst crop leads");
+        assert_eq!(order.len(), change_survey(&hits.iter().map(|h| h.1.clone()).collect::<Vec<_>>(), r, 0).0);
+
+        // The sizes it shows are the ones the run writes.
+        let rv = review_one(&base.join("insert.png"), r, 64);
+        assert_eq!(rv.before.unwrap().1, (600, 535));
+        assert_eq!(rv.after.unwrap().1, (535, 535));
+        assert_eq!(change_words((600, 535), (535, 535)), "600 \u{d7} 535 \u{2192} 535 \u{d7} 535 \u{b7} 65 px off the sides (11%)");
+        assert_eq!(change_words((300, 600), (300, 300)), "300 \u{d7} 600 \u{2192} 300 \u{d7} 300 \u{b7} 300 px off top and bottom (50%)");
+        assert_eq!(change_words((1200, 1000), (600, 500)), "1200 \u{d7} 1000 \u{2192} 600 \u{d7} 500 \u{b7} shrunk to 50%");
     }
 
     #[test]
