@@ -55,9 +55,12 @@ bundle target, so a macOS build is run from `target/release/ncover`.
 
 The open document is a **`Composition`** (`ncover/src/composition.rs`): a
 source plus an ordered list of **`Operation`**s. `render_raster` folds the
-list into a canvas, and that one render is what the preview draws and what
-Save / Overwrite write. Adding a capability means adding an `Operation` case
-and its arm in `render_raster`, not threading new state through the UI.
+list into a canvas, and that one render is what the preview draws.
+`render_for_write` is its twin for Save / Overwrite: the same steps, except
+that a shrinking `Place` is area-averaged (`area_resample`) and then placed
+1:1, so a cover written back keeps its detail. Adding a capability means
+adding an `Operation` case and its arm in BOTH, not threading new state
+through the UI.
 
 - **Every edit goes through `mutate`** in `build_image_view`: clone the
   current value, edit the copy, hand it over. It renders, and only a render
@@ -139,6 +142,10 @@ porting further features across.
   `ImageView::to_picker` (filled by `build_ui`: flips the page toggle). The
   grid's and list's `activate` (double-click / Enter) call it with the
   store's paths, so Picker browses exactly the grid.
+- **An Overwrite bumps `written`** (an `Rc<Cell<u64>>` passed into
+  `build_batch`), which is part of Batch's `scope_key`. The ticker idles
+  while Batch is hidden, so the recount happens when you go back: the survey
+  and plan rebuild and the grid re-renders from disk.
 - **Grid thumbnails render lazily**: a cell asks for its file when first
   bound, `RENDER_WORKERS` threads render it through `review_one` (so
   `batch_render`, the run's function), and each plan is a generation, so
@@ -202,8 +209,12 @@ porting further features across.
   gdk-pixbuf and works everywhere, so colour-from-artwork is fully functional
   off Linux.
 - **Two writing modes with different safety.** *Batch* never writes over its
-  source, but *Overwrite* replaces the original PNG in place. They are one click
-  apart in the UI. Treat any change near the write path as touching user data,
+  source, but *Overwrite* replaces the original PNG or JPEG in place, in its
+  own format (`overwrite_in_place`: JPEG at quality 92, refused when the result
+  has transparency, written to a sibling temp file and renamed over). Framing
+  alone enables it. They are one click apart in the UI, and Batch → Picker →
+  Overwrite is now the intended way to hand-fix a cover, so the music library
+  is one confirm away. Treat any change near the write path as touching user data,
   and keep the Batch grid and dry run working — they are the guard.
 - **It consumes `ndisc` output.** Batch can run a recipe over an ndisc-published
   discography, which makes it a downstream reader of the publish manifest. It

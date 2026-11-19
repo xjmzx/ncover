@@ -30,7 +30,7 @@ X11 screen picker and grew into a small artwork tool. Part of the `n.*` suite.
 - **Build:** a blank canvas, Invert, centred squares, and a disc / label mask
   (alpha / white / colour / gradient corners) — the steps stack.
 - A **Source / Result** rail to compare the raw image against what you built.
-- Save as PNG, or **Overwrite** the original PNG in place.
+- Save as PNG, or **Overwrite** the original PNG or JPEG in place, in its own format.
 - **Batch** the same recipe over a folder, or over an ndisc-published
   discography — with a live grid of every file it would touch and a dry run. It never writes over
   your source.

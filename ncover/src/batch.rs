@@ -565,14 +565,76 @@ pub(crate) fn survey_batch(scope: &Scope, needle: &str) -> Survey {
     }
 }
 
-/// Is the current source a PNG? Only then may Overwrite write the result back
-/// over it — we save PNG, so overwriting anything else would silently change the
-/// format (and, for a JPEG, quietly re-encode as PNG under the same name).
-pub(crate) fn src_is_png(path: &Option<PathBuf>) -> bool {
-    path.as_ref()
-        .and_then(|p| p.extension())
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("png"))
+/// May Overwrite write over this source? PNG and JPEG, each kept in its own
+/// format (`cap_format`, the rule Cap and Square already follow): a JPEG is
+/// never quietly turned into a PNG under the same name. Anything else
+/// (WebP, SVG, GIF) is not offered.
+pub(crate) fn src_can_overwrite(path: &Option<PathBuf>) -> bool {
+    path.as_deref().is_some_and(|p| cap_format(p).is_ok())
+}
+
+/// Does any pixel have alpha below 255?
+pub(crate) fn has_transparency(pb: &gdk_pixbuf::Pixbuf) -> bool {
+    if !pb.has_alpha() {
+        return false;
+    }
+    let (w, h, n, rs) = (pb.width() as usize, pb.height() as usize, pb.n_channels() as usize, pb.rowstride() as usize);
+    let px = unsafe { pb.pixels() };
+    (0..h).any(|y| (0..w).any(|x| px[y * rs + x * n + 3] != 255))
+}
+
+/// The same pixels without the alpha channel.
+fn drop_alpha(pb: &gdk_pixbuf::Pixbuf) -> Result<gdk_pixbuf::Pixbuf> {
+    let (w, h) = (pb.width(), pb.height());
+    let out = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, false, 8, w, h)
+        .ok_or_else(|| anyhow::anyhow!("could not allocate {w}\u{d7}{h}"))?;
+    let (n, rs, ors) = (pb.n_channels() as usize, pb.rowstride() as usize, out.rowstride() as usize);
+    let src = unsafe { pb.pixels() };
+    let dst = unsafe { out.pixels() };
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            dst[y * ors + x * 3..y * ors + x * 3 + 3].copy_from_slice(&src[y * rs + x * n..y * rs + x * n + 3]);
+        }
+    }
+    Ok(out)
+}
+
+/// Write `pb` over `path` in the file's own format (JPEG at quality 92, PNG
+/// as PNG). JPEG has no alpha, so a result with transparent pixels is refused
+/// with the reason rather than flattened onto a colour nobody chose. The
+/// file is written beside the original and renamed over it, so a failed
+/// encode leaves the original as it was.
+pub(crate) fn overwrite_in_place(pb: &gdk_pixbuf::Pixbuf, path: &Path) -> Result<()> {
+    let (fmt, opts) = cap_format(path)?;
+    if fmt == "jpeg" && has_transparency(pb) {
+        anyhow::bail!(
+            "the result has transparent areas and JPEG cannot hold them. Frame it with Cover, \
+             or use a White or Colour disc, or Save PNG instead"
+        );
+    }
+    // The JPEG encoder refuses RGBA outright (glycin on Ubuntu 26.04), even
+    // when every pixel is opaque, so hand it RGB.
+    let rgb;
+    let pb = if fmt == "jpeg" && pb.has_alpha() {
+        rgb = drop_alpha(pb)?;
+        &rgb
+    } else {
+        pb
+    };
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("cover");
+    let tmp = path.with_file_name(format!(".{name}.ncover-tmp"));
+    if let Err(e) = pb.savev(&tmp, fmt, &opts) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(anyhow::Error::msg(e.to_string()));
+    }
+    // Keep the original's permissions: a library file may be read by others.
+    if let Ok(m) = std::fs::metadata(path) {
+        let _ = std::fs::set_permissions(&tmp, m.permissions());
+    }
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        anyhow::Error::msg(e.to_string())
+    })
 }
 
 /// Load one image path into the pieces the view needs: the pixbuf, a display
@@ -1214,6 +1276,75 @@ mod batch_tests {
         let i = y as usize * pb.rowstride() as usize + x as usize * n;
         let b = unsafe { pb.pixels() };
         b[i..i + n].copy_from_slice(&v[..n]);
+    }
+
+    #[test]
+    fn overwrite_squares_a_jpeg_in_place_and_batch_then_leaves_it_alone() {
+        let d = tmpdir("overwrite-jpeg");
+        let f = d.join("cover.jpg");
+        // A typical flagged cover: a little wider than tall, larger than the canvas.
+        solid(1000, 873, false, 0x336699ff).savev(&f, "jpeg", &[("quality", "90")]).unwrap();
+        let square = Recipe { canvas: 600, framing: Framing::Square, disc: None };
+        assert!(would_change(&f, square));
+
+        // What Picker holds after opening it: the source covering the canvas.
+        let doc = Composition::new(gdk_pixbuf::Pixbuf::from_file(&f).unwrap(), 600);
+        let pb = render_for_write(&doc).unwrap();
+        assert!(!has_transparency(&pb), "Cover leaves no gap, even after rounding a shrink");
+        overwrite_in_place(&pb, &f).unwrap();
+
+        let bytes = fs::read(&f).unwrap();
+        assert_eq!(&bytes[..2], &[0xFF, 0xD8], "still a JPEG under its own name");
+        assert_eq!(image_dims(&f), Some((600, 600)));
+        assert!(!would_change(&f, square), "Batch's recount drops it");
+        let left: Vec<_> = fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("cover.jpg")], "no temporary file left behind");
+    }
+
+    #[test]
+    fn overwrite_refuses_a_jpeg_with_transparent_areas_and_leaves_it_untouched() {
+        let d = tmpdir("overwrite-alpha");
+        let f = d.join("cover.jpg");
+        solid(600, 300, false, 0x336699ff).savev(&f, "jpeg", &[]).unwrap();
+        let before = fs::read(&f).unwrap();
+        let mut doc = Composition::new(gdk_pixbuf::Pixbuf::from_file(&f).unwrap(), 600);
+        doc.set_placement(Placement::fit(600, 300, 600)); // bars above and below
+        let pb = render_for_write(&doc).unwrap();
+        let e = overwrite_in_place(&pb, &f).unwrap_err().to_string();
+        assert!(e.contains("transparent"), "{e}");
+        assert_eq!(fs::read(&f).unwrap(), before);
+    }
+
+    #[test]
+    fn overwrite_keeps_a_png_a_png_and_only_png_and_jpeg_are_offered() {
+        let d = tmpdir("overwrite-png");
+        let f = d.join("cover.png");
+        solid(300, 300, true, 0x11223380).savev(&f, "png", &[]).unwrap();
+        let doc = Composition::new(gdk_pixbuf::Pixbuf::from_file(&f).unwrap(), 200);
+        overwrite_in_place(&render_for_write(&doc).unwrap(), &f).unwrap();
+        assert_eq!(&fs::read(&f).unwrap()[1..4], b"PNG");
+        assert_eq!(image_dims(&f), Some((200, 200)));
+        for (name, ok) in [("a.png", true), ("a.JPG", true), ("a.jpeg", true), ("a.webp", false), ("a.svg", false)] {
+            assert_eq!(src_can_overwrite(&Some(PathBuf::from(name))), ok, "{name}");
+        }
+        assert!(!src_can_overwrite(&None), "a Blank canvas has nothing to overwrite");
+    }
+
+    #[test]
+    fn a_written_shrink_averages_rather_than_picking_pixels() {
+        // One-pixel black and white stripes: nearest sampling at half size
+        // keeps one colour; averaging gives mid grey everywhere.
+        let src = solid(400, 400, false, 0xffffffff);
+        for y in 0..400 {
+            for x in (0..400).step_by(2) {
+                set(&src, x, y, [0, 0, 0, 255]);
+            }
+        }
+        let doc = Composition::new(src, 200);
+        let pb = render_for_write(&doc).unwrap();
+        let px = unsafe { pb.pixels() };
+        let i = 100 * pb.rowstride() as usize + 100 * 4;
+        assert!((120..=135).contains(&px[i]), "grey, got {}", px[i]);
     }
 
     #[test]

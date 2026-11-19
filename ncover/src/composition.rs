@@ -132,6 +132,35 @@ pub(crate) fn render_raster(doc: &Composition) -> Result<gdk_pixbuf::Pixbuf> {
     Ok(cur)
 }
 
+/// The document as it is WRITTEN (Save, Overwrite). The same steps as
+/// `render_raster`, except that a source being shrunk is area-averaged first
+/// and then placed 1:1, rather than sampled nearest-pixel. The preview keeps
+/// nearest (it re-renders on every drag, and a colour tool should not invent
+/// colours), but a cover written back to the library must keep its fine
+/// detail and type. Enlarging stays nearest, as on screen.
+pub(crate) fn render_for_write(doc: &Composition) -> Result<gdk_pixbuf::Pixbuf> {
+    let mut cur = empty_canvas(doc.canvas)?;
+    for op in &doc.ops {
+        cur = match *op {
+            Operation::Place(p) => place_for_write(&doc.source.raster, p, doc.canvas)?,
+            Operation::Disc(fill) => disc_template(&cur, fill)?,
+            Operation::Invert => invert_rgb(&cur)?,
+            Operation::Square { frac, colour } => stamp_square(&cur, frac, colour)?,
+        };
+    }
+    Ok(cur)
+}
+
+fn place_for_write(src: &gdk_pixbuf::Pixbuf, p: Placement, canvas: i32) -> Result<gdk_pixbuf::Pixbuf> {
+    if p.scale >= 1.0 {
+        return compose(src, p, canvas);
+    }
+    let nw = ((src.width() as f64 * p.scale).round() as i32).max(1);
+    let nh = ((src.height() as f64 * p.scale).round() as i32).max(1);
+    let small = area_resample(src, nw, nh)?;
+    compose(&small, Placement { dx: p.dx.round(), dy: p.dy.round(), scale: 1.0 }, canvas)
+}
+
 // ---------- undo ----------
 //
 // Undo is two stacks of whole documents. No operation needs an inverse,

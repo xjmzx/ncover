@@ -17,6 +17,11 @@ to diverge. Its version numbers are independent of these.
 
 ### Changed
 - Builds against gtk4's `v4_12` feature (was `v4_10`): GTK 4.12 or newer.
+- **Save and Overwrite shrink smoothly.** When the framing makes the source
+  smaller, the written file is area-averaged (as Cap and Square are) instead
+  of keeping the nearest pixel, so fine type and halftones survive. The
+  on-screen preview is unchanged. Save is now also on for a framed image
+  with no build steps.
 
 ### Added
 - **Batch scope "From a list…"**: a text file with one release folder per
@@ -42,6 +47,17 @@ to diverge. Its version numbers are independent of these.
   order, under the grid's numbers, each with its size change in words
   ("600 × 533 → 533 × 533 · 67 px off the sides (11%)"). Selecting a file
   in either scrolls the other to it.
+- **Overwrite works on JPEG covers**, keeping them JPEG (quality 92) under
+  their own name, and it no longer needs a build step: framing alone is
+  enough, so a cover Batch flagged can be squared by hand from the grid.
+  The confirm says what it will write (the original's size, and "600 ×
+  600, JPEG at quality 92"). A result with transparent areas is refused for a JPEG
+  rather than flattened onto a colour nobody chose. The file is written
+  beside the original and renamed over it, so a failed write leaves the
+  original whole.
+- **Batch recounts after an Overwrite.** Going back to Batch rereads the
+  files: the grid, the counts and the Run button follow, so a cover you
+  have squared in Picker drops off Square's list.
 - **Double-click a file in the grid or the Files list to open it in Picker.**
   The grid's files become Picker's browse list, so ← and → step through
   them in the grid's order ("41 / 241 · cover.jpg"). Enter does the same.

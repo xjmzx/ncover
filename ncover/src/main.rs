@@ -850,6 +850,7 @@ fn build_batch(
     canvas: Rc<Cell<i32>>,
     size_dd: &gtk::DropDown,
     open_in_picker: OpenInPicker,
+    written: Rc<Cell<u64>>,
 ) -> GBox {
     let src: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
     let dst: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
@@ -1821,6 +1822,7 @@ fn build_batch(
         let manifest = manifest.clone();
         let list = list.clone();
         let e_match = e_match.clone();
+        let written = written.clone();
         move || {
             // Under a list the framing chooses the lines, so it is part of
             // the scope; elsewhere a framing change must not re-walk.
@@ -1833,13 +1835,16 @@ fn build_batch(
             } else {
                 String::new()
             };
+            // `written` last: an Overwrite in Picker changed a file on disk,
+            // so every count and every cell may be wrong now.
             format!(
-                "{}|{:?}|{}|{}|{}",
+                "{}|{:?}|{}|{}|{}|{}",
                 dd_scope.selected(),
                 src.borrow(),
                 manifest.borrow().is_some(),
                 lines,
-                e_match.text()
+                e_match.text(),
+                written.get()
             )
         }
     };
@@ -2515,8 +2520,8 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
     // Created here, laid out in the Disc row below: `mutate` keeps them honest.
     let b_save = Button::with_label("Save PNG…");
     b_save.set_sensitive(false);
-    // Overwrite writes the result back over the ORIGINAL file — only offered when
-    // that file is a PNG (the format we save), so it is never a lossy surprise.
+    // Overwrite writes the result back over the ORIGINAL file, in its own
+    // format — only offered for a PNG or JPEG source (`src_can_overwrite`).
     let b_overwrite = Button::with_label("Overwrite");
     b_overwrite.add_css_class("destructive-action");
     b_overwrite.set_sensitive(false);
@@ -2602,9 +2607,10 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
             }
             *doc.borrow_mut() = Some(next);
             *result.borrow_mut() = rendered;
-            b_save.set_sensitive(built);
-            // Overwrite only when there is a result AND the original is a PNG.
-            b_overwrite.set_sensitive(built && src_is_png(&src_path.borrow()));
+            // Framing alone is worth writing (a cover squared by hand), so
+            // both are on whenever there is a document, built or not.
+            b_save.set_sensitive(true);
+            b_overwrite.set_sensitive(src_can_overwrite(&src_path.borrow()));
             if built {
                 // You just built something — show it. Editing while looking at
                 // the raw source would be invisible.
@@ -3279,7 +3285,9 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
 
     let open_in_picker: OpenInPicker = Rc::new(RefCell::new(None));
     let to_picker: FnSlot = Rc::new(RefCell::new(None));
-    let batch = build_batch(window, shared, canvas.clone(), &size_dd, open_in_picker.clone());
+    // Bumped by every Overwrite; Batch folds it into its scope key and recounts.
+    let written: Rc<Cell<u64>> = Rc::new(Cell::new(0));
+    let batch = build_batch(window, shared, canvas.clone(), &size_dd, open_in_picker.clone(), written.clone());
 
     // Changing the output size RESCALES the framing rather than resetting it —
     // you chose where the picture sits, and that decision survives a size change.
@@ -3414,11 +3422,15 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
         #[weak]
         window,
         #[strong]
-        result,
+        doc,
         #[strong]
         name,
         move |_| {
-            let Some(pb) = result.borrow().clone() else { return };
+            let Some(d) = doc.borrow().clone() else { return };
+            let pb = match render_for_write(&d) {
+                Ok(pb) => pb,
+                Err(e) => return show_error(&window, &format!("Save failed: {e:#}")),
+            };
             let stem = name
                 .borrow()
                 .rsplit_once('.')
@@ -3454,24 +3466,37 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
         #[weak]
         window,
         #[strong]
-        result,
+        doc,
         #[strong]
         src_path,
+        #[strong]
+        written,
         move |_| {
-            let Some(pb) = result.borrow().clone() else { return };
+            let Some(d) = doc.borrow().clone() else { return };
             let Some(path) = src_path.borrow().clone() else { return };
-            if !src_is_png(&Some(path.clone())) {
+            if !src_can_overwrite(&Some(path.clone())) {
                 return;
             }
+            let pb = match render_for_write(&d) {
+                Ok(pb) => pb,
+                Err(e) => return show_error(&window, &format!("Overwrite failed: {e:#}")),
+            };
             let name = path
                 .file_name()
                 .and_then(|s| s.to_str())
                 .unwrap_or("this file")
                 .to_string();
+            let (sw, sh) = (d.source.raster.width(), d.source.raster.height());
+            let is_png = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("png"));
+            let kind = if is_png { "PNG" } else { "JPEG at quality 92" };
             let dlg = gtk::AlertDialog::builder()
                 .modal(true)
                 .message(format!("Overwrite {name}?"))
-                .detail("This replaces the original PNG with the result. It cannot be undone.")
+                .detail(format!(
+                    "This replaces the original ({sw} \u{d7} {sh}) with the result as shown \
+                     ({0} \u{d7} {0}, {kind}). It cannot be undone.",
+                    pb.width()
+                ))
                 .buttons(["Cancel", "Overwrite"])
                 .cancel_button(0)
                 .default_button(0)
@@ -3482,12 +3507,17 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
                 clone!(
                     #[weak]
                     window,
+                    #[strong]
+                    written,
                     move |res| {
                         if res.ok() != Some(1) {
                             return; // Cancel, Esc, or error
                         }
-                        if let Err(e) = pb.savev(&path, "png", &[]) {
-                            show_error(&window, &format!("Overwrite failed: {e}"));
+                        match overwrite_in_place(&pb, &path) {
+                            // Batch's grid and counts read the files; tell it
+                            // one changed, so it recounts when you go back.
+                            Ok(()) => written.set(written.get() + 1),
+                            Err(e) => show_error(&window, &format!("Overwrite failed: {e:#}")),
                         }
                     }
                 ),
