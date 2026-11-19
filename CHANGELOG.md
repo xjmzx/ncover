@@ -42,6 +42,9 @@ to diverge. Its version numbers are independent of these.
   order, under the grid's numbers, each with its size change in words
   ("600 × 533 → 533 × 533 · 67 px off the sides (11%)"). Selecting a file
   in either scrolls the other to it.
+- **Double-click a file in the grid or the Files list to open it in Picker.**
+  The grid's files become Picker's browse list, so ← and → step through
+  them in the grid's order ("41 / 241 · cover.jpg"). Enter does the same.
 - **Batch is a page of its own**, beside Picker and Palettes. Its controls
   and the Files list sit in a column on the left, and the grid or the last
   run's results fill the rest of the window. The colours a Colour or

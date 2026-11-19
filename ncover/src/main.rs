@@ -849,6 +849,7 @@ fn build_batch(
     shared: &SharedState,
     canvas: Rc<Cell<i32>>,
     size_dd: &gtk::DropDown,
+    open_in_picker: OpenInPicker,
 ) -> GBox {
     let src: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
     let dst: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
@@ -1132,6 +1133,30 @@ fn build_batch(
             gtk::FileLauncher::new(Some(&f)).open_containing_folder(Some(&window), gio::Cancellable::NONE, |_| {});
         }
     ));
+
+    // Double-click (or Enter) on a grid cell or a list row opens that file in
+    // Picker, with the grid's files as Picker's browse list, so ← → step
+    // through the same files in the same order.
+    let open_at: Rc<dyn Fn(u32)> = {
+        let store = store.clone();
+        Rc::new(move |pos: u32| {
+            let paths: Vec<PathBuf> = (0..store.n_items())
+                .filter_map(|i| store.item(i).and_downcast::<glib::BoxedAnyObject>())
+                .map(|o| o.borrow::<GridItem>().p.path.clone())
+                .collect();
+            if (pos as usize) < paths.len() {
+                if let Some(f) = open_in_picker.borrow().clone() {
+                    f(paths, pos as usize);
+                }
+            }
+        })
+    };
+    grid.connect_activate(clone!(
+        #[strong]
+        open_at,
+        move |_, pos| open_at(pos)
+    ));
+    files_view.connect_activate(move |_, pos| open_at(pos));
 
     // Under the list scope the source button picks the list, not a folder.
     b_src.connect_clicked(clone!(
@@ -2075,6 +2100,13 @@ fn thumb_texture(t: ThumbBytes) -> gtk::gdk::Texture {
 const RENDER_WORKERS: usize = 4;
 
 /// Where a grid cell asks for its render: (position, file).
+/// Batch → Picker: open the grid's files in the editor, starting at one.
+/// Filled by the image view once its browse list exists; Batch only calls it.
+type OpenInPicker = Rc<RefCell<Option<Rc<dyn Fn(Vec<PathBuf>, usize)>>>>;
+
+/// A callback filled in after the widget that calls it is built.
+type FnSlot = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+
 type RenderTx = Rc<RefCell<Option<async_channel::Sender<(u32, PathBuf)>>>>;
 
 type Shot = std::result::Result<(gtk::gdk::Texture, (i32, i32)), String>;
@@ -2304,6 +2336,8 @@ struct ImageView {
     editor: GBox,
     batch: GBox,
     rail: gtk::Revealer,
+    /// Switches the window to the Picker page; the window fills it in.
+    to_picker: FnSlot,
 }
 
 fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageView {
@@ -3243,7 +3277,9 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
     bld.set_visible(false);
     box_.append(&bld);
 
-    let batch = build_batch(window, shared, canvas.clone(), &size_dd);
+    let open_in_picker: OpenInPicker = Rc::new(RefCell::new(None));
+    let to_picker: FnSlot = Rc::new(RefCell::new(None));
+    let batch = build_batch(window, shared, canvas.clone(), &size_dd, open_in_picker.clone());
 
     // Changing the output size RESCALES the framing rather than resetting it —
     // you chose where the picture sits, and that decision survives a size change.
@@ -3803,6 +3839,25 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
         move |_| step(true)
     ));
 
+    // Batch's grid opens here: its files become the browse list, so ← → walk
+    // the grid in its order, and the nav reads "41 / 241 · cover.jpg".
+    *open_in_picker.borrow_mut() = Some({
+        let browse = browse.clone();
+        let show_index = show_index.clone();
+        let nav = nav.clone();
+        let area = area.clone();
+        let to_picker = to_picker.clone();
+        Rc::new(move |paths: Vec<PathBuf>, i: usize| {
+            *browse.borrow_mut() = paths;
+            nav.set_visible(true);
+            if let Some(go) = to_picker.borrow().clone() {
+                go();
+            }
+            show_index(i);
+            area.grab_focus();
+        })
+    });
+
     // Arrow keys on the canvas mirror the buttons while browsing. On the canvas,
     // not the window, so they cannot fight the slider's own left/right or steal
     // keys from the batch filter entry.
@@ -3931,7 +3986,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
     let split = GBox::new(Orientation::Horizontal, 12);
     split.append(&box_);
     split.append(&rail_rev);
-    ImageView { editor: split, batch, rail: rail_rev }
+    ImageView { editor: split, batch, rail: rail_rev, to_picker }
 }
 
 fn export_palette(window: &ApplicationWindow, shared: &SharedState, idx: usize) {
@@ -4590,6 +4645,11 @@ fn build_ui(app: &Application) {
     let iv = build_image_view(&window, &shared);
     image_slot.append(&iv.editor);
     batch_slot.append(&iv.batch);
+    *iv.to_picker.borrow_mut() = Some(Rc::new(clone!(
+        #[weak]
+        view_pick,
+        move || view_pick.set_active(true)
+    )));
 
     // Side columns: restored, bound to their toggles, persisted.
     for (btn, rev, which) in [(&colours_btn, &left_rev, 0), (&rail_btn, &iv.rail, 1)] {

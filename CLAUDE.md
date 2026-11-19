@@ -133,6 +133,12 @@ porting further features across.
   under Cap / Square the grid's length is the Run button's count (the
   ignored `real_list_counts_agree_with_the_run` checks it against a real
   export). Never give either view a list of its own.
+- **Batch → Picker goes through two slots**, because `build_batch` is built
+  before the image view's browse list exists: `OpenInPicker` (filled by the
+  image view: sets `browse`, shows the nav, calls `show_index`) and
+  `ImageView::to_picker` (filled by `build_ui`: flips the page toggle). The
+  grid's and list's `activate` (double-click / Enter) call it with the
+  store's paths, so Picker browses exactly the grid.
 - **Grid thumbnails render lazily**: a cell asks for its file when first
   bound, `RENDER_WORKERS` threads render it through `review_one` (so
   `batch_render`, the run's function), and each plan is a generation, so
