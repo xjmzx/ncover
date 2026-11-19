@@ -3257,6 +3257,13 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
     ));
     bld.append(&b_invert);
 
+    let b_bg = Button::with_label("+ Background");
+    b_bg.set_tooltip_text(Some(
+        "Fill BEHIND the picture with the current colour: the bars Fit leaves, or a disc's transparent corners. \
+         The canvas comes out opaque, so a JPEG can be overwritten. Pick a colour from the cover first to match it.",
+    ));
+    bld.append(&b_bg);
+
     let sq_lbl = Label::new(Some("Square"));
     sq_lbl.add_css_class("dim-label");
     bld.append(&sq_lbl);
@@ -3276,7 +3283,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
     ));
     bld.append(&b_square);
 
-    for b in [&b_invert, &b_square] {
+    for b in [&b_invert, &b_bg, &b_square] {
         b.set_sensitive(false);
     }
     sq_scale.set_sensitive(false);
@@ -3388,6 +3395,26 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
         #[strong]
         push_op,
         move |_| push_op(Operation::Invert)
+    ));
+
+    b_bg.connect_clicked(clone!(
+        #[strong]
+        push_op,
+        #[strong]
+        shared,
+        #[weak]
+        window,
+        move |_| {
+            // The same colour the Disc's Colour fill takes.
+            let cur = {
+                let s = shared.borrow();
+                s.current.or_else(|| s.data.history.first().copied())
+            };
+            match cur {
+                Some(c) => push_op(Operation::Background(c)),
+                None => show_error(&window, "Pick a colour first \u{2014} that is the background."),
+            }
+        }
     ));
 
     b_square.connect_clicked(clone!(
@@ -3663,6 +3690,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
         let bld = bld.clone();
         let b_invert = b_invert.clone();
         let b_square = b_square.clone();
+        let b_bg = b_bg.clone();
         let sq_scale = sq_scale.clone();
         let src_path = src_path.clone();
         let file_lbl = file_lbl.clone();
@@ -3705,6 +3733,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
             bld.set_visible(true);
             b_invert.set_sensitive(true);
             b_square.set_sensitive(true);
+            b_bg.set_sensitive(true);
             sq_scale.set_sensitive(true);
             rebuild_inspect();
         })

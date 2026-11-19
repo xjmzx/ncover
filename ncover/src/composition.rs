@@ -36,6 +36,8 @@ pub(crate) enum Operation {
     Invert,
     /// An opaque, centred square; `frac` is its side as a fraction of the canvas.
     Square { frac: f64, colour: Rgb },
+    /// A solid colour behind everything so far; the canvas comes out opaque.
+    Background(Rgb),
 }
 
 impl Operation {
@@ -46,6 +48,7 @@ impl Operation {
             Operation::Disc(_) => "Disc",
             Operation::Invert => "Invert",
             Operation::Square { .. } => "Square",
+            Operation::Background(_) => "Background",
         }
     }
 }
@@ -127,6 +130,7 @@ pub(crate) fn render_raster(doc: &Composition) -> Result<gdk_pixbuf::Pixbuf> {
             Operation::Disc(fill) => disc_template(&cur, fill)?,
             Operation::Invert => invert_rgb(&cur)?,
             Operation::Square { frac, colour } => stamp_square(&cur, frac, colour)?,
+            Operation::Background(c) => fill_behind(&cur, c)?,
         };
     }
     Ok(cur)
@@ -146,6 +150,7 @@ pub(crate) fn render_for_write(doc: &Composition) -> Result<gdk_pixbuf::Pixbuf> 
             Operation::Disc(fill) => disc_template(&cur, fill)?,
             Operation::Invert => invert_rgb(&cur)?,
             Operation::Square { frac, colour } => stamp_square(&cur, frac, colour)?,
+            Operation::Background(c) => fill_behind(&cur, c)?,
         };
     }
     Ok(cur)

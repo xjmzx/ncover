@@ -27,7 +27,7 @@ X11 screen picker and grew into a small artwork tool. Part of the `n.*` suite.
   an SVG (its *declared* colours, with fonts and text).
 - Place a source on a square canvas (200–1000 px) with drag, zoom, snapping and a
   grid.
-- **Build:** a blank canvas, Invert, centred squares, and a disc / label mask
+- **Build:** a blank canvas, Invert, a background colour behind the picture, centred squares, and a disc / label mask
   (alpha / white / colour / gradient corners) — the steps stack.
 - A **Source / Result** rail to compare the raw image against what you built.
 - Save as PNG, or **Overwrite** the original PNG or JPEG in place, in its own format.

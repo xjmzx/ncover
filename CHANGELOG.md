@@ -24,6 +24,12 @@ to diverge. Its version numbers are independent of these.
   with no build steps.
 
 ### Added
+- **+ Background**, a build step that puts the current colour BEHIND the
+  picture: the bars Fit leaves, or a disc's transparent corners, become that
+  colour, and soft edges blend into it. The canvas comes out opaque, so an
+  off-square JPEG cover can be made square without cropping (Fit, pick a
+  colour from the cover, + Background, Overwrite). Undo takes it back like
+  any step.
 - **Batch scope "From a list…"**: a text file with one release folder per
   line, such as ndisc's Export list from Local covers vs Blossom. Where a
   line names its cover file, only that file is taken, so a release's back

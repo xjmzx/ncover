@@ -215,6 +215,34 @@ pub(crate) fn stamp_square(base: &gdk_pixbuf::Pixbuf, frac: f64, c: Rgb) -> Resu
     Ok(pb)
 }
 
+/// Put a solid colour BEHIND everything on the canvas: each pixel is laid
+/// over `c` by its own alpha, and comes out opaque. Transparent ground (the
+/// bars Fit leaves, a disc's Alpha corners) becomes `c`; opaque pixels are
+/// untouched; a soft edge blends into `c` rather than into black.
+pub(crate) fn fill_behind(base: &gdk_pixbuf::Pixbuf, c: Rgb) -> Result<gdk_pixbuf::Pixbuf> {
+    let pb = base.copy().context("could not copy the canvas")?;
+    if !pb.has_alpha() {
+        return Ok(pb); // nothing is see-through, so nothing is behind
+    }
+    let (w, h, n, rs) = (pb.width() as usize, pb.height() as usize, pb.n_channels() as usize, pb.rowstride() as usize);
+    let bytes = unsafe { pb.pixels() };
+    let bg = [c.r, c.g, c.b];
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * rs + x * n;
+            let a = bytes[i + 3] as u32;
+            if a == 255 {
+                continue;
+            }
+            for k in 0..3 {
+                bytes[i + k] = ((bytes[i + k] as u32 * a + bg[k] as u32 * (255 - a) + 127) / 255) as u8;
+            }
+            bytes[i + 3] = 255;
+        }
+    }
+    Ok(pb)
+}
+
 // ---------- disc template ----------
 //
 // Mask artwork into a disc — a record label, a CD face — with the corners left

@@ -1331,6 +1331,47 @@ mod batch_tests {
     }
 
     #[test]
+    fn fit_plus_a_background_makes_an_off_square_jpeg_overwritable_without_cropping() {
+        let d = tmpdir("overwrite-background");
+        let f = d.join("cover.jpg");
+        solid(600, 548, false, 0x2244aaff).savev(&f, "jpeg", &[("quality", "95")]).unwrap();
+        let mut doc = Composition::new(gdk_pixbuf::Pixbuf::from_file(&f).unwrap(), 600);
+        doc.set_placement(Placement::fit(600, 548, 600)); // bars of 26 px above and below
+        assert!(overwrite_in_place(&render_for_write(&doc).unwrap(), &f).is_err(), "bars are transparent");
+
+        let magenta = Rgb { r: 0xd0, g: 0x10, b: 0x80 };
+        doc.ops.push(Operation::Background(magenta));
+        let pb = render_for_write(&doc).unwrap();
+        assert!(!has_transparency(&pb));
+        let px = unsafe { pb.pixels() };
+        let at = |x: usize, y: usize| {
+            let i = y * pb.rowstride() as usize + x * 4;
+            [px[i], px[i + 1], px[i + 2]]
+        };
+        assert_eq!(at(300, 5), [0xd0, 0x10, 0x80], "the top bar is the background");
+        assert_eq!(at(300, 594), [0xd0, 0x10, 0x80], "and the bottom one");
+        let mid = at(300, 300);
+        assert!(mid[2] > 0x90 && mid[0] < 0x50, "the picture is untouched: {mid:?}");
+
+        overwrite_in_place(&pb, &f).unwrap();
+        assert_eq!(image_dims(&f), Some((600, 600)));
+        let square = Recipe { canvas: 600, framing: Framing::Square, disc: None };
+        assert!(!would_change(&f, square), "Batch's Square now leaves it alone");
+    }
+
+    #[test]
+    fn a_background_blends_soft_edges_and_leaves_opaque_pixels() {
+        let pb = solid(3, 1, true, 0x00000000);
+        set(&pb, 0, 0, [200, 100, 0, 255]); // opaque
+        set(&pb, 1, 0, [200, 100, 0, 128]); // half
+        let out = fill_behind(&pb, Rgb { r: 0, g: 0, b: 255 }).unwrap();
+        let px = unsafe { out.pixels() };
+        assert_eq!(&px[0..4], &[200, 100, 0, 255]);
+        assert_eq!(&px[4..8], &[100, 50, 127, 255]);
+        assert_eq!(&px[8..12], &[0, 0, 255, 255]);
+    }
+
+    #[test]
     fn a_written_shrink_averages_rather_than_picking_pixels() {
         // One-pixel black and white stripes: nearest sampling at half size
         // keeps one colour; averaging gives mid grey everywhere.
