@@ -16,6 +16,23 @@ to diverge. Its version numbers are independent of these.
   grid replaces all three: it is always current and shows every file.
 
 ### Changed
+- **The Quick start is a page of its own**, behind the ⓘ button that now
+  sits with Edit · Batch · Palettes. It was a small card at the top of the
+  colours column; it is now a centred page of four cards (Edit, Batch,
+  Colours & palettes, Formats & limits), rewritten for what the app does
+  today, with the samples buttons and a "Show this page when n.cover
+  starts" box under them.
+- **Batch's Scope is three icon buttons** (folder · list · disc), of equal
+  width, instead of a dropdown. Each says what it takes in its tooltip. The
+  disc only appears when ndisc has exported a published manifest.
+- **Monochrome accents.** The chosen button in a switch (Edit · Batch ·
+  Palettes · ⓘ, HEX / RGB / HSL, Batch's scope) is inverted, light with
+  dark text, instead of a shade darker than the rest. The green buttons
+  (Copy, Pick Color, Run, Start editing, New palette) are now light with
+  dark text too. Colours come from the theme, so a light theme inverts the
+  other way. Overwrite stays red.
+- **The Picker page is now called Edit** (Edit · Batch · Palettes). It is
+  the image editor; the colour picker is a column at its side.
 - Builds against gtk4's `v4_12` feature (was `v4_10`): GTK 4.12 or newer.
 - **Save and Overwrite shrink smoothly.** When the framing makes the source
   smaller, the written file is area-averaged (as Cap and Square are) instead
@@ -63,18 +80,17 @@ to diverge. Its version numbers are independent of these.
   original whole.
 - **Batch recounts after an Overwrite.** Going back to Batch rereads the
   files: the grid, the counts and the Run button follow, so a cover you
-  have squared in Picker drops off Square's list.
-- **Double-click a file in the grid or the Files list to open it in Picker.**
-  The grid's files become Picker's browse list, so ← and → step through
+  have squared in Edit drops off Square's list.
+- **Double-click a file in the grid or the Files list to open it in Edit.**
+  The grid's files become Edit's browse list, so ← and → step through
   them in the grid's order ("41 / 241 · cover.jpg"). Enter does the same.
-- **Batch is a page of its own**, beside Picker and Palettes. Its controls
+- **Batch is a page of its own**, beside Edit and Palettes. Its controls
   and the Files list sit in a column on the left, and the grid or the last
   run's results fill the rest of the window. The colours a Colour or
   Gradient disc will use show beside the recipe.
-- **The Picker page's side columns can be hidden** from the header: the
+- **The Edit page's side columns can be hidden** from the header: the
   colours column (left) and the Source / Result rail (right). Each remembers
-  its state. Turning the tips on brings the colours column back, since the
-  tips sit at its top.
+  its state.
 - **Square**, a fourth batch framing. It crops a non-square image to a
   square of its shorter side, taken from the centre, then shrinks it to the
   size if it is still larger (area averaging, as Cap). It keeps the file's

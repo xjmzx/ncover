@@ -62,9 +62,9 @@ struct AppData {
     /// Palettes view pins/unpins explicitly) — one list, so the two never fight.
     #[serde(default)]
     pinned: Vec<String>,
-    /// Show the getting-started panel. Defaults TRUE — so a fresh install is
-    /// onboarded, and an existing data.json (which has no such field) also gets
-    /// it once, which is right: the features it describes are new to them too.
+    /// Open on the Help page at launch. Defaults TRUE, so a fresh install is
+    /// onboarded. (It was the getting-started panel's visibility until the
+    /// panel became the Help page; the field name is kept so settings carry.)
     #[serde(default = "yes")]
     tips: bool,
     /// The output canvas size. One of CANVAS_SIZES; anything else is ignored.
@@ -519,7 +519,7 @@ fn build_palette_row(
     pin_btn.set_icon_name("view-pin-symbolic");
     pin_btn.set_active(is_pinned(&shared.borrow().data, &pin_name));
     pin_btn.set_tooltip_text(Some(&format!(
-        "Pin to the Picker view (keeps up to {PINNED_MAX} beside History)"
+        "Pin to the Edit page's colours column (keeps up to {PINNED_MAX} beside History)"
     )));
     pin_btn.connect_toggled(clone!(
         #[strong]
@@ -737,76 +737,122 @@ fn import_palette(window: &ApplicationWindow, shared: &SharedState) {
 }
 
 /// The image section: open, view, pick a pixel, extract a palette.
-/// The getting-started panel. Each line names a FEATURE and the sample file that
-/// demonstrates it — a tour with nothing to click through is just a wall of text.
-fn build_tips(window: &ApplicationWindow, toggle: &ToggleButton) -> GBox {
-    let b = GBox::new(Orientation::Vertical, 6);
-    b.add_css_class("tips-card");
+/// The Help page: what the app does, grouped by page, as cards in a centred
+/// column (two side by side when the window is wide). Each card is a heading
+/// and one-line bullets, no prose. `to_edit` is the header's Edit toggle, so
+/// "Start editing" flips the same switch as the header.
+fn build_help(window: &ApplicationWindow, shared: &SharedState, to_edit: &ToggleButton) -> gtk::ScrolledWindow {
+    let col = GBox::new(Orientation::Vertical, 16);
+    col.set_halign(gtk::Align::Center);
+    col.set_valign(gtk::Align::Start);
+    col.set_margin_top(24);
+    col.set_margin_bottom(24);
+    col.set_margin_start(16);
+    col.set_margin_end(16);
 
-    let head = GBox::new(Orientation::Horizontal, 8);
-    let t = Label::new(Some("Quick start"));
-    t.add_css_class("heading");
-    t.set_xalign(0.0);
-    t.set_hexpand(true);
-    head.append(&t);
-    // Just a close [x] — the panel always comes back from the [!] toggle, so
-    // "Don't show again" was overstating it.
-    let close = Button::from_icon_name("window-close-symbolic");
-    close.add_css_class("flat");
-    close.set_tooltip_text(Some("Hide — reopen any time with the [!] button"));
-    head.append(&close);
-    b.append(&head);
+    let title = Label::new(Some("Quick start"));
+    title.add_css_class("title-2");
+    col.append(&title);
+    let sub = Label::new(Some(
+        "Colours, palettes and cover art: frame and build one image in Edit, or run one recipe over many in Batch.",
+    ));
+    sub.add_css_class("dim-label");
+    sub.set_wrap(true);
+    sub.set_max_width_chars(70);
+    sub.set_justify(gtk::Justification::Center);
+    col.append(&sub);
 
-    // A bullet, and a small sub-heading, built the same terse way.
-    let bullet = |b: &GBox, text: &str| {
-        let l = Label::new(Some(&format!("•  {text}")));
-        l.set_xalign(0.0);
-        l.set_wrap(true);
-        l.set_max_width_chars(48);
-        l.add_css_class("dim-label");
-        b.append(&l);
+    let cards = gtk::FlowBox::new();
+    cards.set_selection_mode(gtk::SelectionMode::None);
+    cards.set_homogeneous(false);
+    cards.set_valign(gtk::Align::Start);
+    cards.set_min_children_per_line(1);
+    cards.set_max_children_per_line(2);
+    cards.set_column_spacing(16);
+    cards.set_row_spacing(16);
+    cards.set_halign(gtk::Align::Center);
+    let card = |head: &str, lines: &[&str]| -> GBox {
+        let b = GBox::new(Orientation::Vertical, 6);
+        b.add_css_class("help-card");
+        b.set_size_request(400, -1);
+        b.set_valign(gtk::Align::Fill);
+        let h = Label::new(Some(head));
+        h.add_css_class("heading");
+        h.set_xalign(0.0);
+        h.set_margin_bottom(2);
+        b.append(&h);
+        for line in lines {
+            let l = Label::new(Some(&format!("\u{2022}  {line}")));
+            l.set_xalign(0.0);
+            l.set_wrap(true);
+            l.set_max_width_chars(52);
+            b.append(&l);
+        }
+        b
     };
-    let subhead = |b: &GBox, text: &str| {
-        let l = Label::new(Some(text));
-        l.set_xalign(0.0);
-        l.set_margin_top(4);
-        l.add_css_class("section-head");
-        b.append(&l);
-    };
-
-    // What it does — one line each, no prose.
-    for line in [
-        "Pick any colour on screen → history + clipboard.",
-        "Image: Open a file, or Browse a folder (◀ ▶ / arrows).",
-        "Click any pixel in an image to pick it.",
-        "Build: Blank, Invert, stamp Squares, mask to a Disc — steps stack.",
-        "Palettes: recent colours form a History palette; pin up to 3.",
-        "Batch: one recipe over a folder or ndisc's published releases.",
-    ] {
-        bullet(&b, line);
+    let edit = card("Edit", &[
+        "Open a file, or Browse a folder and step with \u{2190} \u{2192}.",
+        "Frame it: Fit, Cover, Centre, 1:1, or drag and scroll.",
+        "Click any pixel to pick its colour.",
+        "Build: Blank, Invert, + Background, + Square, and a Disc. Steps stack; Reset clears them.",
+        "Undo Ctrl+Z, redo Ctrl+Shift+Z or Ctrl+Y.",
+        "Save PNG\u{2026} writes a copy. Overwrite replaces the original PNG or JPEG, after asking.",
+    ]);
+    let batch = card("Batch", &[
+        "One recipe over a folder, ndisc's published releases, or a list such as ndisc's Export list.",
+        "Framing: Cover, Fit, Cap (shrink only) or Square (crop to the centre).",
+        "The grid shows every file the run would touch; Before shows them as they are.",
+        "Double-click a file to open it in Edit.",
+        "Batch never writes over its source: choose an Output folder, and Dry run first.",
+    ]);
+    let colours = card("Colours & palettes", &[
+        "Pick Color picks anywhere on screen, as HEX, RGB or HSL, copied to the clipboard.",
+        "Recent colours collect into the History palette.",
+        "Import .gpl or .json; export GPL, CSS or JSON.",
+        "Pin up to three palettes beside the editor.",
+    ]);
+    let formats = card("Formats & limits", &[
+        "Opens PNG, SVG, JPEG and WebP.",
+        "Saves PNG. Overwrite keeps the file's format (JPEG at quality 92).",
+        "Canvas: square, 200\u{2013}1000 px.",
+        "SVG: reads its declared colours, fonts and text.",
+    ]);
+    for c in [&edit, &batch, &colours, &formats] {
+        cards.append(c);
     }
+    col.append(&cards);
 
-    // Formats & limits — the compatibility list, and the things it will NOT do.
-    subhead(&b, "Formats & limits");
-    for line in [
-        "Opens: PNG · SVG · JPEG · WebP.",
-        "Saves: PNG only.",
-        "SVG: reads its declared colours, fonts, text.",
-        "Canvas: square, 200–1000 px.",
-        "Batch never writes your source — check the grid first.",
-    ] {
-        bullet(&b, line);
-    }
-
-    let row = GBox::new(Orientation::Horizontal, 6);
+    // Samples: files that show the features off, written on first run.
+    let row = GBox::new(Orientation::Horizontal, 8);
+    row.set_halign(gtk::Align::Center);
     let open_dir = Button::with_label("Open samples folder");
     let restore = Button::with_label("Restore samples");
     restore.set_tooltip_text(Some(
         "Rewrite any sample you have deleted. Existing files are left alone.",
     ));
+    let start = Button::with_label("Start editing");
+    start.add_css_class("suggested-action");
     row.append(&open_dir);
     row.append(&restore);
-    b.append(&row);
+    row.append(&start);
+    col.append(&row);
+
+    // The one setting this page owns: open on it at launch, or on Edit.
+    let at_launch = gtk::CheckButton::with_label("Show this page when n.cover starts");
+    at_launch.set_halign(gtk::Align::Center);
+    at_launch.set_active(shared.borrow().data.tips);
+    at_launch.connect_toggled(clone!(
+        #[strong]
+        shared,
+        move |c| {
+            let mut s = shared.borrow_mut();
+            if s.data.tips != c.is_active() {
+                s.data.tips = c.is_active();
+                let _ = save_data(&s.data);
+            }
+        }
+    ));
+    col.append(&at_launch);
 
     open_dir.connect_clicked(clone!(
         #[weak]
@@ -831,16 +877,18 @@ fn build_tips(window: &ApplicationWindow, toggle: &ToggleButton) -> GBox {
             Err(e) => show_error(&window, &format!("Could not write samples: {e}")),
         }
     ));
-    // "Don't show again" un-presses the header toggle rather than hiding the
-    // panel behind its back — one piece of state, so the button in the header
-    // can never disagree with what is on screen.
-    close.connect_clicked(clone!(
+    start.connect_clicked(clone!(
         #[weak]
-        toggle,
-        move |_| toggle.set_active(false)
+        to_edit,
+        move |_| to_edit.set_active(true)
     ));
 
-    b
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_hexpand(true);
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&col));
+    scroll
 }
 
 /// The batch section: a recipe, a folder, and a run you can watch and stop.
@@ -884,11 +932,50 @@ fn build_batch(
     let scope_lbl = Label::new(Some("Scope"));
     scope_lbl.add_css_class("dim-label");
     row_scope.append(&scope_lbl);
+    // The scope's STATE is this DropDown, never shown: everything downstream
+    // reads `dd_scope.selected()` and listens to its notify. What you see is
+    // a row of three equal icon toggles (folder · list · disc) that set it,
+    // and follow it if anything else does.
     let dd_scope = gtk::DropDown::from_strings(scope_names);
-    dd_scope.set_tooltip_text(Some(
-        "Folder — any tree of artwork.\n\nFrom a list… — a text file with one release folder per line, such as ndisc's Export list from Local covers vs Blossom. Where a line names its cover file, only that file is taken. Where it names actions, Cap and Square take only the lines marked ncover:cap or ncover:square, and the rest are counted.\n\nPublished discography — the exact releases ndisc has published to Nostr, read from the suite's published.json. Its covers, mirrored to your output folder.",
-    ));
-    row_scope.append(&dd_scope);
+    let scope_row = GBox::new(Orientation::Horizontal, 0);
+    scope_row.add_css_class("linked");
+    scope_row.add_css_class("mono-toggles");
+    scope_row.set_homogeneous(true);
+    let scope_tips = [
+        ("folder-symbolic", "Folder: any tree of artwork, searched recursively."),
+        ("view-list-bullet-symbolic", "From a list: a text file with one release folder per line, such as ndisc's Export list from Local covers vs Blossom. Where a line names its cover file, only that file is taken. Where it names actions, Cap and Square take only the lines marked ncover:cap or ncover:square, and the rest are counted."),
+        ("media-optical-cd-audio-symbolic", "Published discography: the exact releases ndisc has published to Nostr, read from the suite's published.json. Its covers, mirrored to your output folder."),
+    ];
+    let mut scope_btns: Vec<ToggleButton> = Vec::new();
+    for (i, (icon, tip)) in scope_tips.iter().enumerate().take(scope_names.len()) {
+        let b = ToggleButton::new();
+        b.set_icon_name(icon);
+        b.set_tooltip_text(Some(tip));
+        b.set_size_request(48, -1);
+        if let Some(first) = scope_btns.first() {
+            b.set_group(Some(first));
+        }
+        b.connect_toggled(clone!(
+            #[weak]
+            dd_scope,
+            move |b| {
+                if b.is_active() && dd_scope.selected() != i as u32 {
+                    dd_scope.set_selected(i as u32);
+                }
+            }
+        ));
+        scope_row.append(&b);
+        scope_btns.push(b);
+    }
+    scope_btns[0].set_active(true);
+    dd_scope.connect_selected_notify(move |dd| {
+        if let Some(b) = scope_btns.get(dd.selected() as usize) {
+            if !b.is_active() {
+                b.set_active(true);
+            }
+        }
+    });
+    row_scope.append(&scope_row);
     row_scope.set_hexpand(true);
     body.append(&row_scope);
 
@@ -970,7 +1057,7 @@ fn build_batch(
     chip.set_content_width(34);
     chip.set_content_height(16);
     chip.set_valign(gtk::Align::Center);
-    chip.set_tooltip_text(Some("The picked colours a Colour or Gradient disc uses: the current one, then the one before. Pick on the Picker page."));
+    chip.set_tooltip_text(Some("The picked colours a Colour or Gradient disc uses: the current one, then the one before. Pick on the Edit page."));
     {
         let shared = shared.clone();
         chip.set_draw_func(move |_, cr, w, h| {
@@ -2105,6 +2192,12 @@ fn thumb_texture(t: ThumbBytes) -> gtk::gdk::Texture {
 const RENDER_WORKERS: usize = 4;
 
 /// Where a grid cell asks for its render: (position, file).
+/// "0.4.0-beta.2+abc" → "0.4.0": the suite's version chip shows only
+/// major.minor.patch.
+fn short_version(v: &str) -> &str {
+    v.split(['-', '+']).next().unwrap_or(v)
+}
+
 /// Batch → Picker: open the grid's files in the editor, starting at one.
 /// Filled by the image view once its browse list exists; Batch only calls it.
 type OpenInPicker = Rc<RefCell<Option<Rc<dyn Fn(Vec<PathBuf>, usize)>>>>;
@@ -4101,13 +4194,33 @@ const APP_CSS: &str = "
   .dim-label { opacity: 0.74; }
 
   .section-head { font-weight: 700; }
-  .tips-card {
-    background: alpha(@accent_bg_color, 0.10);
-    border: 1px solid alpha(@accent_bg_color, 0.35);
-    border-radius: 10px;
-    padding: 10px;
+  /* Monochrome accents (the suite's default for new apps). A linked group
+     of toggles (the header switch, HEX / RGB / HSL, Batch's scope) shows
+     the chosen one inverted: the text colour as ground, the label or icon in
+     the window's ground colour. The theme's own checked state is only a
+     shade off the rest. The theme's green suggested-action buttons (Copy, Pick
+     Color, Run, Start editing, New palette) take the same inversion.
+     @theme_* names: Yaru does not define @window_fg_color. */
+  .mono-toggles > button:checked,
+  .mono-toggles > button:checked:hover,
+  button.suggested-action {
+    background: @theme_fg_color;
+    background-image: none;
+    color: @theme_bg_color;
+    border-color: @theme_fg_color;
   }
-  .tips-card label { font-size: 0.86em; }
+  button.suggested-action:hover { background: alpha(@theme_fg_color, 0.85); }
+  button.suggested-action:active { background: alpha(@theme_fg_color, 0.70); }
+  button.suggested-action:disabled {
+    background: alpha(@theme_fg_color, 0.25);
+    color: alpha(@theme_bg_color, 0.8);
+  }
+  .help-card {
+    background: alpha(@accent_bg_color, 0.08);
+    border: 1px solid alpha(@accent_bg_color, 0.30);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
   .canvas-frame { border-radius: 6px; }
   expander title { padding: 2px 0; }
   /* Swatches must touch: the theme pads flowboxchild, which shows as a gap
@@ -4362,18 +4475,35 @@ fn build_ui(app: &Application) {
     // button buried in a section.
     let view_switch = GBox::new(Orientation::Horizontal, 0);
     view_switch.add_css_class("linked");
-    let view_pick = ToggleButton::with_label("Picker");
+    view_switch.add_css_class("mono-toggles");
+    let view_pick = ToggleButton::with_label("Edit");
     let view_batch = ToggleButton::with_label("Batch");
     view_batch.set_group(Some(&view_pick));
     let view_pal = ToggleButton::with_label("Palettes");
     view_pal.set_group(Some(&view_pick));
+    // Help is a page like the others, so it sits in the same switch.
+    let view_help = ToggleButton::new();
+    view_help.set_icon_name("help-about-symbolic");
+    view_help.set_tooltip_text(Some("Quick start: what this app can do"));
+    view_help.set_group(Some(&view_pick));
     view_pick.set_active(true);
     view_switch.append(&view_pick);
     view_switch.append(&view_batch);
     view_switch.append(&view_pal);
+    view_switch.append(&view_help);
 
     // The Picker page's two side columns, each shown or hidden from the
     // header, where the toggle stays reachable when its column is gone.
+    // The app and its version, top left, where the suite's Tauri apps put
+    // their identity chip. Plain text in the header's own font here (GTK, not
+    // a web view). major.minor.patch only; any suffix goes to the tooltip,
+    // the suite's rule, so the width holds from release to release.
+    let version = env!("CARGO_PKG_VERSION");
+    let ident = Label::new(Some(&format!("ncover {}", short_version(version))));
+    ident.set_tooltip_text(Some(&format!("n.cover v{version}")));
+    ident.set_margin_start(6);
+    ident.set_margin_end(6);
+    header.pack_start(&ident);
     let colours_btn = ToggleButton::new();
     colours_btn.set_icon_name("sidebar-show-symbolic");
     colours_btn.set_tooltip_text(Some("Show or hide the colours column"));
@@ -4383,14 +4513,6 @@ fn build_ui(app: &Application) {
     rail_btn.set_tooltip_text(Some("Show or hide the Source / Result rail"));
     header.set_title_widget(Some(&view_switch));
 
-    // Tips toggle. One control, not two: a button that opens the panel and a
-    // separate toggle that hides it would be two ways to say the same thing, and
-    // they would disagree the moment one of them got out of step. This IS the
-    // `tips` flag — pressed means shown, and "Don't show again" un-presses it.
-    let tips_btn = ToggleButton::new();
-    tips_btn.set_icon_name("help-about-symbolic");
-    tips_btn.set_tooltip_text(Some("Getting started — what this app can do"));
-    header.pack_end(&tips_btn);
     header.pack_end(&rail_btn);
 
     window.set_titlebar(Some(&header));
@@ -4413,6 +4535,7 @@ fn build_ui(app: &Application) {
 
     let fmt_row = GBox::new(Orientation::Horizontal, 0);
     fmt_row.add_css_class("linked");
+    fmt_row.add_css_class("mono-toggles");
     let fmt_hex = ToggleButton::with_label("HEX");
     let fmt_rgb = ToggleButton::with_label("RGB");
     let fmt_hsl = ToggleButton::with_label("HSL");
@@ -4504,7 +4627,7 @@ fn build_ui(app: &Application) {
     pal_view.append(&pv_head);
 
     let pv_hint = Label::new(Some(
-        "The pin marks a palette to ride along on the Picker view (up to 3 beside History). Using a palette's colour pins it too.",
+        "The pin marks a palette to ride along on the Edit page (up to 3 beside History). Using a palette's colour pins it too.",
     ));
     pv_hint.add_css_class("dim-label");
     pv_hint.set_wrap(true);
@@ -4582,6 +4705,15 @@ fn build_ui(app: &Application) {
     stack.add_named(&batch_slot, Some("batch"));
     stack.add_named(&pal_view, Some("palettes"));
     window.set_child(Some(&stack));
+    view_help.connect_toggled(clone!(
+        #[weak]
+        stack,
+        move |b| {
+            if b.is_active() {
+                stack.set_visible_child_name("help");
+            }
+        }
+    ));
 
     view_pick.connect_toggled(clone!(
         #[weak]
@@ -4662,12 +4794,11 @@ fn build_ui(app: &Application) {
         }
     }
 
-    // The panel is always built; the toggle decides whether it is on screen. It
-    // used to only exist when `tips` was true, which is exactly why there was no
-    // way back once you dismissed it.
-    let tips = build_tips(&window, &tips_btn);
-    tips.set_visible(shared.borrow().data.tips);
-    outer.prepend(&tips);
+    // Help is the fourth page. `tips` now means "open on it at launch".
+    stack.add_named(&build_help(&window, &shared, &view_pick), Some("help"));
+    if shared.borrow().data.tips {
+        view_help.set_active(true);
+    }
 
     // Palettes collapse state, restored and persisted. (History no longer has a
     // section, so its old `open_history` flag is simply unused now.)
@@ -4684,22 +4815,6 @@ fn build_ui(app: &Application) {
         }
     ));
 
-    tips_btn.set_active(shared.borrow().data.tips);
-    tips_btn.connect_toggled(clone!(
-        #[strong]
-        shared,
-        #[weak]
-        tips,
-        move |b| {
-            let on = b.is_active();
-            tips.set_visible(on);
-            let mut s = shared.borrow_mut();
-            if s.data.tips != on {
-                s.data.tips = on;
-                let _ = save_data(&s.data);
-            }
-        }
-    ));
 
     let iv = build_image_view(&window, &shared);
     image_slot.append(&iv.editor);
@@ -4731,17 +4846,6 @@ fn build_ui(app: &Application) {
             }
         ));
     }
-    // The tips live at the top of the colours column: asking for them
-    // brings the column back.
-    tips_btn.connect_toggled(clone!(
-        #[weak]
-        colours_btn,
-        move |b| {
-            if b.is_active() {
-                colours_btn.set_active(true);
-            }
-        }
-    ));
 
     // swatch draw
     {

@@ -17,7 +17,7 @@ X11 screen picker and grew into a small artwork tool. Part of the `n.*` suite.
   copied to the clipboard.
 - Recent colours collect into a compact **History palette**.
 - **Palettes:** import `.gpl` / `.json`, export to GPL / CSS / JSON, named
-  swatches, pin up to three to the Picker, plus a dedicated Palettes view.
+  swatches, pin up to three beside the editor, plus a dedicated Palettes view.
 
 **Artwork**
 

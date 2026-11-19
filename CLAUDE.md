@@ -126,22 +126,26 @@ porting further features across.
   ticker show a dialog: it runs every 300 ms.
 - The ticker does nothing while the Batch page is not on screen
   (`is_mapped`) or a run is in flight.
-- **Batch is a page of its own** (header switch Picker · Batch · Palettes).
+- **Batch is a page of its own** (header switch Edit · Batch · Palettes · ⓘ Help, the Help page built by `build_help`; the `tips` setting now means "open on Help at launch"; the Edit page was "Picker" until 0.4.0, and the code still calls it `picker` / `view_pick`).
   It is still built inside `build_image_view`, because its size picker is
   bound to the canvas size, and handed out in `ImageView`. The right side is
   a `Stack` of the grid ("Files") and the last run's results.
+- **Batch's scope state is a DropDown that is never shown** (`dd_scope`,
+  0 folder · 1 list · 2 published): the code reads `selected()` and its
+  notify. The visible control is three linked icon toggles that set it and
+  follow it. Keep it that way, or every scope reader changes.
 - **The grid and the numbered Files list are ONE model** (a
   `gio::ListStore` of `GridItem`s) under one `SingleSelection`, filled by
   `show_plan` from `plan_items`. That is why their numbers agree, and why
   under Cap / Square the grid's length is the Run button's count (the
   ignored `real_list_counts_agree_with_the_run` checks it against a real
   export). Never give either view a list of its own.
-- **Batch → Picker goes through two slots**, because `build_batch` is built
+- **Batch → Edit goes through two slots**, because `build_batch` is built
   before the image view's browse list exists: `OpenInPicker` (filled by the
   image view: sets `browse`, shows the nav, calls `show_index`) and
   `ImageView::to_picker` (filled by `build_ui`: flips the page toggle). The
   grid's and list's `activate` (double-click / Enter) call it with the
-  store's paths, so Picker browses exactly the grid.
+  store's paths, so Edit browses exactly the grid.
 - **An Overwrite bumps `written`** (an `Rc<Cell<u64>>` passed into
   `build_batch`), which is part of Batch's `scope_key`. The ticker idles
   while Batch is hidden, so the recount happens when you go back: the survey
@@ -212,7 +216,7 @@ porting further features across.
   source, but *Overwrite* replaces the original PNG or JPEG in place, in its
   own format (`overwrite_in_place`: JPEG at quality 92, refused when the result
   has transparency, written to a sibling temp file and renamed over). Framing
-  alone enables it. They are one click apart in the UI, and Batch → Picker →
+  alone enables it. They are one click apart in the UI, and Batch → Edit →
   Overwrite is now the intended way to hand-fix a cover, so the music library
   is one confirm away. Treat any change near the write path as touching user data,
   and keep the Batch grid and dry run working — they are the guard.
