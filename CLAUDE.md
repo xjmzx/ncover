@@ -121,7 +121,13 @@ porting further features across.
 - **`recipe_now` / `scope_now` say why not as a string; `resolve_*` turn
   that into a dialog.** The ticker uses the silent pair. Never let the
   ticker show a dialog: it runs every 300 ms.
-- The ticker does nothing while Batch is collapsed or a run is in flight.
+- The ticker does nothing while the Batch page is not on screen
+  (`is_mapped`) or a run is in flight.
+- **Batch is a page of its own** (header switch Picker · Batch · Palettes).
+  It is still built inside `build_image_view`, because its size picker is
+  bound to the canvas size, and handed out in `ImageView`. Its outputs
+  (Preview sheet, review list, run results) share one `Stack` on the right;
+  whatever runs last is the page shown.
 - **Output names are planned for the whole run (`plan_dests`), never per
   file.** Every output is `.png`, so `batch_dest` alone maps `cover.jpg`
   and `cover.png` in one release to the same file, and the second write

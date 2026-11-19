@@ -76,6 +76,12 @@ struct AppData {
     open_history: bool,
     #[serde(default = "yes")]
     open_palettes: bool,
+    /// The Picker page's side columns: the colour column on the left, the
+    /// Source / Result rail on the right. Each can be hidden for room.
+    #[serde(default = "yes")]
+    show_colours: bool,
+    #[serde(default = "yes")]
+    show_rail: bool,
     /// Have the sample files been written? Set ONCE, on the first run that seeds
     /// them.
     ///
@@ -843,7 +849,7 @@ fn build_batch(
     shared: &SharedState,
     canvas: Rc<Cell<i32>>,
     size_dd: &gtk::DropDown,
-) -> gtk::Expander {
+) -> GBox {
     let src: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
     let dst: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
     let stop = Arc::new(AtomicBool::new(false));
@@ -853,8 +859,22 @@ fn build_batch(
     // A cover list (ndisc's Export list), with the file it came from.
     let list: Rc<RefCell<Option<(PathBuf, CoverList)>>> = Rc::new(RefCell::new(None));
 
+    // Batch is a page of its own: the controls in a column on the left
+    // (`body`), and what they produce on the right, at the window's full
+    // height. One area for all three outputs, since only one is current: the
+    // Preview sheet, the review list (Cap / Square), a run's results.
     let body = GBox::new(Orientation::Vertical, 8);
-    body.set_margin_top(6);
+    let main_stack = gtk::Stack::new();
+    main_stack.set_hexpand(true);
+    main_stack.set_vexpand(true);
+    let empty = Label::new(Some(
+        "Preview shows what the recipe does before anything is written. Under Cap or Square it lists every file the run would change, before and after.\n\nA run's results appear here.",
+    ));
+    empty.add_css_class("dim-label");
+    empty.set_wrap(true);
+    empty.set_max_width_chars(60);
+    empty.set_valign(gtk::Align::Center);
+    main_stack.add_named(&empty, Some("empty"));
 
     // --- scope: a folder, a cover list, or ndisc's published discography ---
     // The published option is only offered when ndisc has actually exported a
@@ -947,12 +967,41 @@ fn build_batch(
         .build();
     row_r.append(&dd_size);
 
+    body.append(&row_r);
+
+    // The colours Colour / Gradient would use. They are picked on the Picker
+    // page, so this page shows them rather than leave the fill a guess.
+    let row_note = GBox::new(Orientation::Horizontal, 8);
+    let chip = DrawingArea::new();
+    chip.set_content_width(34);
+    chip.set_content_height(16);
+    chip.set_valign(gtk::Align::Center);
+    chip.set_tooltip_text(Some("The picked colours a Colour or Gradient disc uses: the current one, then the one before. Pick on the Picker page."));
+    {
+        let shared = shared.clone();
+        chip.set_draw_func(move |_, cr, w, h| {
+            let st = shared.borrow();
+            let cur = st.current.or_else(|| st.data.history.first().copied());
+            let prev = st.data.history.get(1).copied().or(cur);
+            for (i, c) in [cur, prev].into_iter().enumerate() {
+                let x = i as f64 * w as f64 / 2.0;
+                match c {
+                    Some(c) => cr.set_source_rgb(c.r as f64 / 255.0, c.g as f64 / 255.0, c.b as f64 / 255.0),
+                    None => cr.set_source_rgba(1.0, 1.0, 1.0, 0.1),
+                }
+                cr.rectangle(x, 0.0, w as f64 / 2.0, h as f64);
+                let _ = cr.fill();
+            }
+        });
+    }
+    row_note.append(&chip);
     let size_note = Label::new(None);
     size_note.add_css_class("dim-label");
     size_note.set_hexpand(true);
-    size_note.set_xalign(1.0);
-    row_r.append(&size_note);
-    body.append(&row_r);
+    size_note.set_xalign(0.0);
+    size_note.set_wrap(true);
+    row_note.append(&size_note);
+    body.append(&row_note);
 
     // --- what it will touch: the survey, kept current while you type ---
     let survey_lbl = Label::new(Some("Choose a source folder."));
@@ -1006,8 +1055,8 @@ fn build_batch(
     let l_prog = Label::new(None);
     l_prog.add_css_class("dim-label");
     l_prog.set_hexpand(true);
-    l_prog.set_xalign(1.0);
-    row_go.append(&l_prog);
+    l_prog.set_xalign(0.0);
+    l_prog.set_wrap(true);
     body.append(&row_go);
 
     // The preview contact sheet — hidden until you ask for one.
@@ -1018,11 +1067,9 @@ fn build_batch(
     preview_flow.set_column_spacing(6);
     let preview_scroll = gtk::ScrolledWindow::new();
     preview_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    preview_scroll.set_min_content_height(160);
-    preview_scroll.set_max_content_height(340);
     preview_scroll.set_child(Some(&preview_flow));
-    preview_scroll.set_visible(false);
-    body.append(&preview_scroll);
+    preview_flow.set_valign(gtk::Align::Start);
+    main_stack.add_named(&preview_scroll, Some("preview"));
 
     // The review list: under Cap or Square, Preview lists EVERY file the run
     // would change, before and after, with the sizes. Twelve thumbnails are a
@@ -1032,12 +1079,9 @@ fn build_batch(
     review_list.add_css_class("boxed-list");
     let review_scroll = gtk::ScrolledWindow::new();
     review_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    review_scroll.set_min_content_height(260);
-    review_scroll.set_max_content_height(620);
-    review_scroll.set_propagate_natural_height(true);
     review_scroll.set_child(Some(&review_list));
-    review_scroll.set_visible(false);
-    body.append(&review_scroll);
+    review_list.set_valign(gtk::Align::Start);
+    main_stack.add_named(&review_scroll, Some("review"));
     // Bumped by every Preview, so a review still rendering stops when a new
     // one starts instead of appending to it.
     let review_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1047,10 +1091,9 @@ fn build_batch(
     results.add_css_class("boxed-list");
     let res_scroll = gtk::ScrolledWindow::new();
     res_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    res_scroll.set_min_content_height(90);
-    res_scroll.set_max_content_height(240);
     res_scroll.set_child(Some(&results));
-    body.append(&res_scroll);
+    results.set_valign(gtk::Align::Start);
+    main_stack.add_named(&res_scroll, Some("results"));
 
     // Under the list scope the source button picks the list, not a folder.
     b_src.connect_clicked(clone!(
@@ -1338,6 +1381,7 @@ fn build_batch(
         let resolve_scope = resolve_scope.clone();
         let resolve_recipe = resolve_recipe.clone();
         let results = results.clone();
+        let main_stack = main_stack.clone();
         let l_prog = l_prog.clone();
         let b_dry = b_dry.clone();
         let b_run = b_run.clone();
@@ -1363,6 +1407,7 @@ fn build_batch(
             while let Some(c) = results.first_child() {
                 results.remove(&c);
             }
+            main_stack.set_visible_child_name("results");
             l_prog.set_text("scanning…");
             stop.store(false, Ordering::Relaxed);
             b_dry.set_sensitive(false);
@@ -1558,11 +1603,10 @@ fn build_batch(
         let resolve_scope = resolve_scope.clone();
         let resolve_recipe = resolve_recipe.clone();
         let preview_flow = preview_flow.clone();
-        let preview_scroll = preview_scroll.clone();
         let l_prog = l_prog.clone();
         let b_preview = b_preview.clone();
         let review_list = review_list.clone();
-        let review_scroll = review_scroll.clone();
+        let main_stack = main_stack.clone();
         let review_gen = review_gen.clone();
         let window = window.clone();
         Rc::new(move || {
@@ -1575,7 +1619,6 @@ fn build_batch(
             }
             let g = review_gen.fetch_add(1, Ordering::Relaxed) + 1;
             if recipe.framing.keeps_file() {
-                preview_scroll.set_visible(false);
                 start_review(
                     scope,
                     needle,
@@ -1583,14 +1626,13 @@ fn build_batch(
                     g,
                     review_gen.clone(),
                     &review_list,
-                    &review_scroll,
+                    &main_stack,
                     &l_prog,
                     &window,
                 );
                 return;
             }
-            review_scroll.set_visible(false);
-            preview_scroll.set_visible(true);
+            main_stack.set_visible_child_name("preview");
             l_prog.set_text("rendering preview…");
             b_preview.set_sensitive(false);
 
@@ -1678,21 +1720,27 @@ fn build_batch(
         move |_| preview()
     ));
 
-    let head = GBox::new(Orientation::Horizontal, 8);
-    let t = Label::new(Some("Batch"));
-    t.add_css_class("section-head");
-    t.set_xalign(0.0);
-    t.set_hexpand(true);
-    head.append(&t);
-    let hint = Label::new(Some("apply this recipe to a folder — Preview first"));
-    hint.add_css_class("dim-label");
-    head.append(&hint);
-    head.set_hexpand(true);
+    let side = gtk::ScrolledWindow::new();
+    side.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    body.set_margin_end(6); // room for the scrollbar
+    side.set_child(Some(&body));
+    side.set_size_request(460, -1);
+    side.set_hexpand(false);
+    side.set_vexpand(true);
 
-    let exp = gtk::Expander::new(None);
-    exp.set_label_widget(Some(&head));
-    exp.set_child(Some(&body));
-    exp.set_expanded(false);
+    let main = GBox::new(Orientation::Vertical, 8);
+    main.set_hexpand(true);
+    main.append(&l_prog);
+    main.append(&main_stack);
+
+    let page = GBox::new(Orientation::Horizontal, 12);
+    page.set_margin_top(12);
+    page.set_margin_bottom(12);
+    page.set_margin_start(12);
+    page.set_margin_end(12);
+    page.append(&side);
+    page.append(&Separator::new(Orientation::Vertical));
+    page.append(&main);
 
     // ---------- keeping the survey and the sample current ----------
     //
@@ -1759,15 +1807,18 @@ fn build_batch(
             )
         }
     };
-    let exp_w = exp.downgrade();
+    let page_w = page.downgrade();
     glib::timeout_add_local(std::time::Duration::from_millis(300), move || {
-        let Some(exp) = exp_w.upgrade() else {
+        let Some(page) = page_w.upgrade() else {
             return glib::ControlFlow::Break;
         };
-        // Collapsed: nobody is looking. A run in flight: it owns the CPU.
-        if !exp.is_expanded() || !b_run.is_sensitive() {
+        // Another page showing: nobody is looking. A run in flight: it owns the CPU.
+        if !page.is_mapped() || !b_run.is_sensitive() {
             return glib::ControlFlow::Continue;
         }
+        // The picked colours change on the Picker page and fire nothing here.
+        chip.set_visible(dd_disc.selected() >= 3);
+        chip.queue_draw();
         let skey = scope_key();
         if shown_scope.borrow().as_ref() != Some(&skey) {
             // The count on the button is about to be wrong; stop promising it.
@@ -1973,7 +2024,7 @@ fn build_batch(
         glib::ControlFlow::Continue
     });
 
-    exp
+    page
 }
 
 /// The framing dropdown's entries, in order.
@@ -2097,14 +2148,14 @@ fn start_review(
     g: u64,
     gen: Arc<std::sync::atomic::AtomicU64>,
     list: &ListBox,
-    scroll: &gtk::ScrolledWindow,
+    stack: &gtk::Stack,
     l_prog: &Label,
     window: &ApplicationWindow,
 ) {
     while let Some(c) = list.first_child() {
         list.remove(&c);
     }
-    scroll.set_visible(true);
+    stack.set_visible_child_name("review");
     l_prog.set_text("reading sizes…");
     let (tx, rx) = async_channel::unbounded::<ReviewMsg>();
     let worker_gen = gen.clone();
@@ -2312,7 +2363,16 @@ enum ViewMode {
 /// Side of a rail thumbnail, px.
 const THUMB: i32 = 140;
 
-fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
+/// What the image view hands back to the window: the editor itself, the Batch
+/// page (built here because it shares the canvas size), and the right rail's
+/// revealer, which the header's toggle drives.
+struct ImageView {
+    editor: GBox,
+    batch: GBox,
+    rail: gtk::Revealer,
+}
+
+fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageView {
     // The document: the loaded source, where it sits, and every build step on
     // it (see composition.rs). None until something is opened. It changes
     // ONLY through `mutate`, below.
@@ -3249,7 +3309,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
     bld.set_visible(false);
     box_.append(&bld);
 
-    box_.append(&build_batch(window, shared, canvas.clone(), &size_dd));
+    let batch = build_batch(window, shared, canvas.clone(), &size_dd);
 
     // Changing the output size RESCALES the framing rather than resetting it —
     // you chose where the picture sits, and that decision survives a size change.
@@ -3924,11 +3984,20 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> GBox {
         rail.append(thumb);
     }
 
+    // The rail and its separator hide together, sliding out to the right,
+    // so the canvas takes the width.
+    let rail_box = GBox::new(Orientation::Horizontal, 12);
+    rail_box.append(&Separator::new(Orientation::Vertical));
+    rail_box.append(&rail);
+    let rail_rev = gtk::Revealer::new();
+    rail_rev.set_transition_type(gtk::RevealerTransitionType::SlideLeft);
+    rail_rev.set_child(Some(&rail_box));
+    rail_rev.set_reveal_child(true);
+
     let split = GBox::new(Orientation::Horizontal, 12);
     split.append(&box_);
-    split.append(&Separator::new(Orientation::Vertical));
-    split.append(&rail);
-    split
+    split.append(&rail_rev);
+    ImageView { editor: split, batch, rail: rail_rev }
 }
 
 fn export_palette(window: &ApplicationWindow, shared: &SharedState, idx: usize) {
@@ -4246,11 +4315,24 @@ fn build_ui(app: &Application) {
     let view_switch = GBox::new(Orientation::Horizontal, 0);
     view_switch.add_css_class("linked");
     let view_pick = ToggleButton::with_label("Picker");
+    let view_batch = ToggleButton::with_label("Batch");
+    view_batch.set_group(Some(&view_pick));
     let view_pal = ToggleButton::with_label("Palettes");
     view_pal.set_group(Some(&view_pick));
     view_pick.set_active(true);
     view_switch.append(&view_pick);
+    view_switch.append(&view_batch);
     view_switch.append(&view_pal);
+
+    // The Picker page's two side columns, each shown or hidden from the
+    // header, where the toggle stays reachable when its column is gone.
+    let colours_btn = ToggleButton::new();
+    colours_btn.set_icon_name("sidebar-show-symbolic");
+    colours_btn.set_tooltip_text(Some("Show or hide the colours column"));
+    header.pack_start(&colours_btn);
+    let rail_btn = ToggleButton::new();
+    rail_btn.set_icon_name("sidebar-show-right-symbolic");
+    rail_btn.set_tooltip_text(Some("Show or hide the Source / Result rail"));
     header.set_title_widget(Some(&view_switch));
 
     // Tips toggle. One control, not two: a button that opens the panel and a
@@ -4261,6 +4343,7 @@ fn build_ui(app: &Application) {
     tips_btn.set_icon_name("help-about-symbolic");
     tips_btn.set_tooltip_text(Some("Getting started — what this app can do"));
     header.pack_end(&tips_btn);
+    header.pack_end(&rail_btn);
 
     window.set_titlebar(Some(&header));
 
@@ -4428,15 +4511,27 @@ fn build_ui(app: &Application) {
     columns.set_margin_bottom(12);
     columns.set_margin_start(12);
     columns.set_margin_end(12);
-    columns.append(&left_scroll);
-    columns.append(&Separator::new(Orientation::Vertical));
+    let left_box = GBox::new(Orientation::Horizontal, 12);
+    left_box.append(&left_scroll);
+    left_box.append(&Separator::new(Orientation::Vertical));
+    let left_rev = gtk::Revealer::new();
+    left_rev.set_transition_type(gtk::RevealerTransitionType::SlideRight);
+    left_rev.set_child(Some(&left_box));
+    left_rev.set_reveal_child(true);
+    columns.append(&left_rev);
     columns.append(&image_scroll);
+
+    // The Batch page's slot, filled once the image view (which builds it) exists.
+    let batch_slot = GBox::new(Orientation::Vertical, 0);
+    batch_slot.set_hexpand(true);
+    batch_slot.set_vexpand(true);
 
     // Two pages behind the header switch: the picker, and the full palettes view.
     let stack = gtk::Stack::new();
     stack.set_hexpand(true);
     stack.set_vexpand(true);
     stack.add_named(&columns, Some("picker"));
+    stack.add_named(&batch_slot, Some("batch"));
     stack.add_named(&pal_view, Some("palettes"));
     window.set_child(Some(&stack));
 
@@ -4449,6 +4544,15 @@ fn build_ui(app: &Application) {
             }
         }
     ));
+    view_batch.connect_toggled(clone!(
+        #[weak]
+        stack,
+        move |b| {
+            if b.is_active() {
+                stack.set_visible_child_name("batch");
+            }
+        }
+    ));
     view_pal.connect_toggled(clone!(
         #[weak]
         stack,
@@ -4458,6 +4562,16 @@ fn build_ui(app: &Application) {
             }
         }
     ));
+    // The side toggles belong to the Picker page; elsewhere they would
+    // toggle something you cannot see.
+    view_pick
+        .bind_property("active", &colours_btn, "visible")
+        .sync_create()
+        .build();
+    view_pick
+        .bind_property("active", &rail_btn, "visible")
+        .sync_create()
+        .build();
     // "Palettes view →" on the Picker just flips the same switch, so there is one
     // source of truth for which page is showing.
     manage_btn.connect_clicked(clone!(
@@ -4539,7 +4653,42 @@ fn build_ui(app: &Application) {
         }
     ));
 
-    image_slot.append(&build_image_view(&window, &shared));
+    let iv = build_image_view(&window, &shared);
+    image_slot.append(&iv.editor);
+    batch_slot.append(&iv.batch);
+
+    // Side columns: restored, bound to their toggles, persisted.
+    for (btn, rev, which) in [(&colours_btn, &left_rev, 0), (&rail_btn, &iv.rail, 1)] {
+        btn.bind_property("active", rev, "reveal-child").sync_create().build();
+        let on = {
+            let d = &shared.borrow().data;
+            if which == 0 { d.show_colours } else { d.show_rail }
+        };
+        btn.set_active(on);
+        btn.connect_toggled(clone!(
+            #[strong]
+            shared,
+            move |b| {
+                let mut s = shared.borrow_mut();
+                let slot = if which == 0 { &mut s.data.show_colours } else { &mut s.data.show_rail };
+                if *slot != b.is_active() {
+                    *slot = b.is_active();
+                    let _ = save_data(&s.data);
+                }
+            }
+        ));
+    }
+    // The tips live at the top of the colours column: asking for them
+    // brings the column back.
+    tips_btn.connect_toggled(clone!(
+        #[weak]
+        colours_btn,
+        move |b| {
+            if b.is_active() {
+                colours_btn.set_active(true);
+            }
+        }
+    ));
 
     // swatch draw
     {

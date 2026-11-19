@@ -22,6 +22,19 @@ to diverge. Its version numbers are independent of these.
   column, Cap takes only the lines marked `ncover:cap` and Square only
   those marked `ncover:square`. The survey line counts the rest without
   touching them ("not in this run: 112 need a new source · 24 to review …").
+- **A review list for Cap and Square.** Preview lists every file the run
+  would change, not the first twelve: before and after, the release name,
+  the size change in words ("600 × 533 → 533 × 533 · 67 px off the sides
+  (11%)") and Open folder. The most cropped (Square) or largest (Cap) come
+  first.
+- **Batch is a page of its own**, beside Picker and Palettes. Its controls sit
+  in a column on the left, and the preview, review list or run results fill
+  the rest of the window. The colours a Colour or Gradient disc will use show
+  beside the recipe.
+- **The Picker page's side columns can be hidden** from the header: the
+  colours column (left) and the Source / Result rail (right). Each remembers
+  its state. Turning the tips on brings the colours column back, since the
+  tips sit at its top.
 - **Square**, a fourth batch framing. It crops a non-square image to a
   square of its shorter side, taken from the centre, then shrinks it to the
   size if it is still larger (area averaging, as Cap). It keeps the file's
