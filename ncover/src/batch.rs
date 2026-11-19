@@ -1496,11 +1496,15 @@ mod batch_tests {
         let d = tmpdir("pad-jpeg");
         let (src, out) = (d.join("in/cover.jpg"), d.join("out/cover.jpg"));
         fs::create_dir_all(src.parent().unwrap()).unwrap();
-        // 600×500: a red top edge, a blue bottom edge, grey between.
+        // 600×500: red bands at the top, blue at the bottom, grey between.
+        // Bands, not single rows: a JPEG encoder that subsamples colour
+        // (the CI runner's does) blurs a one-pixel row into its neighbours.
         let pb = solid(600, 500, false, 0x808080ff);
-        for x in 0..600 {
-            set(&pb, x, 0, [255, 0, 0, 255]);
-            set(&pb, x, 499, [0, 0, 255, 255]);
+        for y in 0..16 {
+            for x in 0..600 {
+                set(&pb, x, y, [255, 0, 0, 255]);
+                set(&pb, x, 499 - y, [0, 0, 255, 255]);
+            }
         }
         pb.savev(&src, "jpeg", &[("quality", "100")]).unwrap();
         let r = Recipe { canvas: 600, framing: Framing::Pad(PadFill::Edge), disc: None };
