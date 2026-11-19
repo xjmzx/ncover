@@ -800,7 +800,7 @@ fn build_help(window: &ApplicationWindow, shared: &SharedState, to_edit: &Toggle
     ]);
     let batch = card("Batch", &[
         "One recipe over a folder, ndisc's published releases, or a list such as ndisc's Export list.",
-        "Framing: Cover, Fit, Cap (shrink only) or Square (crop to the centre).",
+        "Framing: Cover, Fit, Cap (shrink only), Square (crop to the centre) or Pad (fill out to a square, nothing cropped).",
         "The grid shows every file the run would touch; Before shows them as they are.",
         "Double-click a file to open it in Edit.",
         "Batch never writes over its source: choose an Output folder, and Dry run first.",
@@ -1018,9 +1018,9 @@ fn build_batch(
     ));
     row_r.append(&e_match);
 
-    let dd_frame = gtk::DropDown::from_strings(&["Cover", "Fit", "Cap", "Square"]);
+    let dd_frame = gtk::DropDown::from_strings(&["Cover", "Fit", "Cap", "Square", "Pad"]);
     dd_frame.set_tooltip_text(Some(
-        "Cover fills the square (edges cropped); Fit puts the whole image inside it. Both write a square PNG at the size.\n\nCap shrinks only images larger than the size, keeping their shape and format (JPEG stays JPEG), and leaves the rest alone. Use it to tidy a library's covers.\n\nSquare crops only images that are not square, to a square of their shorter side taken from the centre, then shrinks any larger than the size. It keeps the format and leaves square images alone. Meant for a chosen few, from a list.\n\nA dragged placement is about ONE image's dimensions, so it is not offered here.",
+        "Cover fills the square (edges cropped); Fit puts the whole image inside it. Both write a square PNG at the size.\n\nCap shrinks only images larger than the size, keeping their shape and format (JPEG stays JPEG), and leaves the rest alone. Use it to tidy a library's covers.\n\nSquare crops only images that are not square, to a square of their shorter side taken from the centre, then shrinks any larger than the size. It keeps the format and leaves square images alone. Meant for a chosen few, from a list.\n\nPad squares without cropping: the image sits in the middle of a square of its longer side, and the bars are filled (the edge colour, white, black or your picked colour). Then as Square: shrunk if larger than the size, format kept, square images left alone, the same list lines.\n\nA dragged placement is about ONE image's dimensions, so it is not offered here.",
     ));
     row_r.append(&dd_frame);
 
@@ -1029,6 +1029,25 @@ fn build_batch(
         "Disc mask + corner fill. Colour/Gradient take the colours you have picked, exactly as the single-image Disc buttons do.",
     ));
     row_r.append(&dd_disc);
+    // Pad's bar fill takes the disc's place: a disc has no room under Pad
+    // (it keeps the file's format), and the row stays one row.
+    let dd_pad = gtk::DropDown::from_strings(&["Edge colour", "White", "Black", "Colour"]);
+    dd_pad.set_tooltip_text(Some(
+        "What fills Pad's bars. Edge colour: each bar takes the average of the image edge beside it, transparency included. Colour: the colour you have picked.",
+    ));
+    dd_pad.set_visible(false);
+    row_r.append(&dd_pad);
+    dd_frame.connect_selected_notify(clone!(
+        #[weak]
+        dd_disc,
+        #[weak]
+        dd_pad,
+        move |dd| {
+            let pad = dd.selected() == 4;
+            dd_pad.set_visible(pad);
+            dd_disc.set_visible(!pad);
+        }
+    ));
 
     // The size, here as well as above the canvas. Batch used to read only the
     // editor's picker, which is hidden until an image is open, so with nothing
@@ -1421,6 +1440,8 @@ fn build_batch(
             format!("\u{2192} at most {c} px, same format")
         } else if frame == 3 {
             format!("\u{2192} square, at most {c} px, same format")
+        } else if frame == 4 {
+            format!("\u{2192} padded square, at most {c} px, same format")
         } else {
             format!("\u{2192} {c}\u{d7}{c} PNG")
         }
@@ -1487,6 +1508,7 @@ fn build_batch(
         let canvas = canvas.clone();
         let dd_frame = dd_frame.clone();
         let dd_disc = dd_disc.clone();
+        let dd_pad = dd_pad.clone();
         Rc::new(move || {
             let (cur, prev) = {
                 let st = shared.borrow();
@@ -1509,6 +1531,20 @@ fn build_batch(
                 },
             };
             let framing = framing_at(dd_frame.selected());
+            if let Framing::Pad(_) = framing {
+                let fill = match dd_pad.selected() {
+                    0 => PadFill::Edge,
+                    1 => PadFill::Solid(Rgb { r: 255, g: 255, b: 255 }),
+                    2 => PadFill::Solid(Rgb { r: 0, g: 0, b: 0 }),
+                    _ => match cur {
+                        Some(c) => PadFill::Solid(c),
+                        None => return Err("Pick a colour first \u{2014} that fills the bars.".into()),
+                    },
+                };
+                // The disc dropdown is hidden under Pad; whatever it says
+                // does not apply.
+                return Ok(Recipe { canvas: canvas.get(), framing: Framing::Pad(fill), disc: None });
+            }
             if framing == Framing::Cap && disc.is_some() {
                 return Err("Cap keeps each image's own shape, and a disc needs a square. Choose No disc to cap.".into());
             }
@@ -1549,7 +1585,7 @@ fn build_batch(
             }
             let Some(recipe) = resolve_recipe() else { return };
             let needle = e_match.text().to_string();
-            let left_why = if recipe.framing == Framing::Square {
+            let left_why = if recipe.framing.squares() {
                 "already square"
             } else {
                 "already within the cap"
@@ -1945,7 +1981,7 @@ fn build_batch(
             return glib::ControlFlow::Continue;
         }
         // The picked colours change on the Picker page and fire nothing here.
-        chip.set_visible(dd_disc.selected() >= 3);
+        chip.set_visible(if dd_pad.is_visible() { dd_pad.selected() == 3 } else { dd_disc.selected() >= 3 });
         chip.queue_draw();
         let skey = scope_key();
         if shown_scope.borrow().as_ref() != Some(&skey) {
@@ -2086,6 +2122,16 @@ fn build_batch(
                         ),
                         format!("Run ({n} of {total} to square)"),
                     ),
+                    Framing::Pad(_) if n == 0 => (
+                        format!("All {total} are already square. Pad would write nothing."),
+                        format!("Run (0 of {total} to pad)"),
+                    ),
+                    Framing::Pad(_) => (
+                        format!(
+                            "{n} of {total} would be padded to a square and held to {c} px, the least square first \u{b7} {rest} already square, left alone"
+                        ),
+                        format!("Run ({n} of {total} to pad)"),
+                    ),
                     Framing::Cap if n == 0 => (
                         format!("All {total} are already within {c} px. Cap would write nothing."),
                         format!("Run (0 of {total} to shrink)"),
@@ -2128,6 +2174,8 @@ fn framing_at(i: u32) -> Framing {
         1 => Framing::Fit,
         2 => Framing::Cap,
         3 => Framing::Square,
+        // The fill is chosen beside it; `recipe_now` puts it in.
+        4 => Framing::Pad(PadFill::Edge),
         _ => Framing::Cover,
     }
 }
@@ -2236,6 +2284,7 @@ impl GridItem {
     fn new(n: usize, p: Planned, strip: &Path, r: Recipe) -> GridItem {
         let words = match p.dims {
             None => "size unreadable".to_string(),
+            Some(d) if matches!(r.framing, Framing::Pad(_)) => pad_words(d, out_dims(d, r)),
             Some(d) if r.framing.keeps_file() => change_words(d, out_dims(d, r)),
             Some((w, h)) => {
                 let (ow, oh) = out_dims((w, h), r);

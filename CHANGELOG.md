@@ -41,6 +41,16 @@ to diverge. Its version numbers are independent of these.
   with no build steps.
 
 ### Added
+- **Pad**, a fifth batch framing: square without cropping. A non-square
+  image sits in the middle of a square of its longer side, and the bars are
+  filled with the **edge colour** (each bar the average of the image edge
+  beside it, transparency included, so a transparent PNG logo gets
+  transparent bars), white, black or your picked colour. Then as Square:
+  shrunk if larger than the size, the file's format kept (JPEG stays JPEG),
+  square images left alone, and the same `ncover:square` list lines, since
+  cropping or padding is your call per run. For covers with art or type to
+  the edge, and for label logos. The grid lists the least square first
+  ("600 × 538 → 600 × 600 · 62 px added top and bottom").
 - **+ Background**, a build step that puts the current colour BEHIND the
   picture: the bars Fit leaves, or a disc's transparent corners, become that
   colour, and soft edges blend into it. The canvas comes out opaque, so an

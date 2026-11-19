@@ -36,13 +36,36 @@ pub(crate) enum Framing {
     /// nothing for an image that is already square. Meant for "a select
     /// few" (a list scope), since a centre crop is a per-cover judgement.
     Square,
+    /// Square without cropping: put a non-square image in the middle of a
+    /// square of its LONGER side, fill the bars with the `PadFill`, then
+    /// shrink to `Recipe::canvas` if larger. For an image whose edges carry
+    /// art or type (a label logo, a cover with text to the edge). Like
+    /// Square it keeps the file's name and format and writes nothing for an
+    /// image that is already square, and it takes the same list lines.
+    Pad(PadFill),
+}
+
+/// What fills Pad's bars.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PadFill {
+    /// Each bar takes the average of the image edge it sits against (the
+    /// top row for the top bar, and so on), alpha included, so a
+    /// transparent PNG logo gets transparent bars.
+    Edge,
+    Solid(Rgb),
 }
 
 impl Framing {
     /// Cap and Square tidy a file in place: same name, same format, and a
     /// file they would not change is not written at all.
     pub(crate) fn keeps_file(self) -> bool {
-        matches!(self, Framing::Cap | Framing::Square)
+        matches!(self, Framing::Cap | Framing::Square | Framing::Pad(_))
+    }
+
+    /// Square and Pad both make a non-square image square; they differ only
+    /// in whether the long side is cropped or the short side is filled.
+    pub(crate) fn squares(self) -> bool {
+        matches!(self, Framing::Square | Framing::Pad(_))
     }
 
     /// The `ncover:<job>` action this framing carries out in ndisc's cover
@@ -50,7 +73,9 @@ impl Framing {
     pub(crate) fn job(self) -> Option<&'static str> {
         match self {
             Framing::Cap => Some("cap"),
-            Framing::Square => Some("square"),
+            // ndisc marks "not square"; cropping or padding is the
+            // operator's choice, so Pad takes the same lines.
+            Framing::Square | Framing::Pad(_) => Some("square"),
             Framing::Cover | Framing::Fit => None,
         }
     }
@@ -732,12 +757,83 @@ pub(crate) fn batch_render(src: &Path, r: Recipe) -> Result<gdk_pixbuf::Pixbuf> 
                 Ok(sq)
             };
         }
+        Framing::Pad(fill) => {
+            let pb = pb.apply_embedded_orientation().unwrap_or(pb);
+            let sq = pad_to_square(&pb, fill)?;
+            let side = sq.width();
+            return if side > r.canvas {
+                area_resample(&sq, r.canvas, r.canvas)
+            } else {
+                Ok(sq)
+            };
+        }
     };
     let framed = compose(&pb, place, r.canvas)?;
     match r.disc {
         Some(fill) => disc_template(&framed, fill),
         None => Ok(framed),
     }
+}
+
+/// `pb` in the middle of a square of its longer side, the bars filled per
+/// `fill`. Same channels as the source: a JPEG stays RGB, so it can be
+/// written back as JPEG. A square image comes back as a copy.
+pub(crate) fn pad_to_square(pb: &gdk_pixbuf::Pixbuf, fill: PadFill) -> Result<gdk_pixbuf::Pixbuf> {
+    let (w, h) = (pb.width(), pb.height());
+    let side = w.max(h);
+    let alpha = pb.has_alpha();
+    let out = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, alpha, 8, side, side)
+        .ok_or_else(|| anyhow::anyhow!("could not allocate {side}\u{d7}{side}"))?;
+    let (n, rs) = (pb.n_channels() as usize, pb.rowstride() as usize);
+    let src = unsafe { pb.pixels() };
+    let px = |x: i32, y: i32| -> [u8; 4] {
+        let i = y as usize * rs + x as usize * n;
+        [src[i], src[i + 1], src[i + 2], if alpha { src[i + 3] } else { 255 }]
+    };
+    // The mean of a run of edge pixels.
+    let mean = |pts: &mut dyn Iterator<Item = [u8; 4]>| -> [u8; 4] {
+        let (mut acc, mut k) = ([0u64; 4], 0u64);
+        for p in pts {
+            for c in 0..4 {
+                acc[c] += p[c] as u64;
+            }
+            k += 1;
+        }
+        let k = k.max(1);
+        [(acc[0] / k) as u8, (acc[1] / k) as u8, (acc[2] / k) as u8, (acc[3] / k) as u8]
+    };
+    let solid = |c: Rgb| [c.r, c.g, c.b, 255];
+    // (first bar, second bar): top/bottom for a wide image, left/right for a tall one.
+    let (a, b) = match fill {
+        PadFill::Solid(c) => (solid(c), solid(c)),
+        PadFill::Edge if w >= h => (
+            mean(&mut (0..w).map(|x| px(x, 0))),
+            mean(&mut (0..w).map(|x| px(x, h - 1))),
+        ),
+        PadFill::Edge => (
+            mean(&mut (0..h).map(|y| px(0, y))),
+            mean(&mut (0..h).map(|y| px(w - 1, y))),
+        ),
+    };
+    let (ox, oy) = ((side - w) / 2, (side - h) / 2);
+    let on = out.n_channels() as usize;
+    let ors = out.rowstride() as usize;
+    let dst = unsafe { out.pixels() };
+    for y in 0..side {
+        for x in 0..side {
+            let i = y as usize * ors + x as usize * on;
+            let inside = x >= ox && x < ox + w && y >= oy && y < oy + h;
+            let p = if inside {
+                px(x - ox, y - oy)
+            } else if (w >= h && y < oy) || (w < h && x < ox) {
+                a
+            } else {
+                b
+            };
+            dst[i..i + on].copy_from_slice(&p[..on]);
+        }
+    }
+    Ok(out)
 }
 
 /// Every output path for a run, relative to the output root, in the order of
@@ -856,7 +952,7 @@ pub(crate) fn would_change(f: &Path, r: Recipe) -> bool {
     }
     match (r.framing, image_dims(f)) {
         (Framing::Cap, Some((w, h))) => cap_size(w, h, r.canvas).is_some(),
-        (Framing::Square, Some((w, h))) => w != h,
+        (Framing::Square | Framing::Pad(_), Some((w, h))) => w != h,
         _ => true,
     }
 }
@@ -919,7 +1015,12 @@ pub(crate) fn batch_one(src: &Path, dest: &Path, r: Recipe, dry: bool) -> Result
     } else {
         ("png", Vec::new())
     };
-    let final_pb = batch_render(src, r)?;
+    let mut final_pb = batch_render(src, r)?;
+    // The JPEG encoder refuses RGBA, even fully opaque. Square and Cap keep
+    // a JPEG's RGB, but say so here rather than trust every framing to.
+    if format.0 == "jpeg" && final_pb.has_alpha() {
+        final_pb = drop_alpha(&final_pb)?;
+    }
     if dry {
         return Ok(Some(dest));
     }
@@ -1125,7 +1226,7 @@ pub(crate) fn review_order(hits: Vec<(usize, PathBuf)>, r: Recipe) -> Vec<(usize
         .map(|h| {
             let key = match image_dims(&h.1) {
                 None => f64::INFINITY,
-                Some((w, h)) if r.framing == Framing::Square => trim_share(w, h),
+                Some((w, h)) if r.framing.squares() => trim_share(w, h),
                 Some((w, h)) => w.max(h) as f64,
             };
             (key, h)
@@ -1176,6 +1277,21 @@ pub(crate) fn change_words(from: (i32, i32), to: (i32, i32)) -> String {
     t
 }
 
+/// Pad's change in words: "600 × 533 → 600 × 600 · 67 px added top and
+/// bottom". `to` is the written size, so a pad that is then shrunk says so.
+pub(crate) fn pad_words(from: (i32, i32), to: (i32, i32)) -> String {
+    let (w, h) = from;
+    let mut t = format!("{w} \u{d7} {h} \u{2192} {} \u{d7} {}", to.0, to.1);
+    if w != h {
+        let where_ = if w > h { "top and bottom" } else { "the sides" };
+        t += &format!(" \u{b7} {} px added {where_}", (w - h).abs());
+        if to.0 < w.max(h) {
+            t += &format!(", then shrunk to {:.0}%", to.0 as f64 / w.max(h) as f64 * 100.0);
+        }
+    }
+    t
+}
+
 /// One file in the Batch grid and the numbered Files list.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Planned {
@@ -1217,6 +1333,10 @@ pub(crate) fn out_dims(src: (i32, i32), r: Recipe) -> (i32, i32) {
         Framing::Cap => cap_size(w, h, r.canvas).unwrap_or((w, h)),
         Framing::Square => {
             let s = w.min(h).min(r.canvas);
+            (s, s)
+        }
+        Framing::Pad(_) => {
+            let s = w.max(h).min(r.canvas);
             (s, s)
         }
     }
@@ -1369,6 +1489,64 @@ mod batch_tests {
         assert_eq!(&px[0..4], &[200, 100, 0, 255]);
         assert_eq!(&px[4..8], &[100, 50, 127, 255]);
         assert_eq!(&px[8..12], &[0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn pad_squares_a_wide_jpeg_without_cropping_and_keeps_it_jpeg() {
+        let d = tmpdir("pad-jpeg");
+        let (src, out) = (d.join("in/cover.jpg"), d.join("out/cover.jpg"));
+        fs::create_dir_all(src.parent().unwrap()).unwrap();
+        // 600×500: a red top edge, a blue bottom edge, grey between.
+        let pb = solid(600, 500, false, 0x808080ff);
+        for x in 0..600 {
+            set(&pb, x, 0, [255, 0, 0, 255]);
+            set(&pb, x, 499, [0, 0, 255, 255]);
+        }
+        pb.savev(&src, "jpeg", &[("quality", "100")]).unwrap();
+        let r = Recipe { canvas: 600, framing: Framing::Pad(PadFill::Edge), disc: None };
+        assert!(would_change(&src, r));
+        assert_eq!(Framing::Pad(PadFill::Edge).job(), Some("square"), "the same list lines as Square");
+
+        let got = batch_render(&src, r).unwrap();
+        assert_eq!((got.width(), got.height()), (600, 600));
+        assert_eq!(out_dims((600, 500), r), (600, 600));
+        assert!(!got.has_alpha(), "a JPEG stays RGB");
+        let px = unsafe { got.pixels() };
+        let at = |x: usize, y: usize| px[y * got.rowstride() as usize + x * 3..][..3].to_vec();
+        assert!(at(300, 10)[0] > 200 && at(300, 10)[2] < 60, "top bar takes the top edge: {:?}", at(300, 10));
+        assert!(at(300, 590)[2] > 200 && at(300, 590)[0] < 60, "bottom bar takes the bottom edge: {:?}", at(300, 590));
+        let mid = at(300, 300);
+        assert!((110..=150).contains(&mid[0]), "the picture is all there, not cropped: {mid:?}");
+
+        batch_one(&src, &out, r, false).unwrap().unwrap();
+        assert_eq!(&fs::read(&out).unwrap()[..2], &[0xFF, 0xD8]);
+        assert_eq!(image_dims(&out), Some((600, 600)));
+        assert!(!would_change(&out, r), "already square now: left alone next time");
+    }
+
+    #[test]
+    fn pad_gives_a_transparent_logo_transparent_bars_and_shrinks_a_large_one() {
+        // A tall 400×800 PNG logo, transparent at its edges.
+        let pb = solid(400, 800, true, 0x00000000);
+        for y in 300..500 {
+            for x in 100..300 {
+                set(&pb, x, y, [10, 20, 30, 255]);
+            }
+        }
+        let sq = pad_to_square(&pb, PadFill::Edge).unwrap();
+        assert_eq!((sq.width(), sq.height()), (800, 800));
+        let px = unsafe { sq.pixels() };
+        let i = 400 * sq.rowstride() as usize + 50 * 4;
+        assert_eq!(px[i + 3], 0, "the left bar is transparent, like the edge beside it");
+
+        let d = tmpdir("pad-logo");
+        let f = d.join("logo.png");
+        pb.savev(&f, "png", &[]).unwrap();
+        let white = Recipe { canvas: 600, framing: Framing::Pad(PadFill::Solid(Rgb { r: 255, g: 255, b: 255 })), disc: None };
+        let got = batch_render(&f, white).unwrap();
+        assert_eq!((got.width(), got.height()), (600, 600), "padded to 800, then shrunk to the size");
+        assert_eq!(out_dims((400, 800), white), (600, 600));
+        assert_eq!(pad_words((400, 800), (600, 600)), "400 \u{d7} 800 \u{2192} 600 \u{d7} 600 \u{b7} 400 px added the sides, then shrunk to 75%");
     }
 
     #[test]

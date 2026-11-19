@@ -31,11 +31,16 @@ X11 screen picker and grew into a small artwork tool. Part of the `n.*` suite.
   (alpha / white / colour / gradient corners) — the steps stack.
 - A **Source / Result** rail to compare the raw image against what you built.
 - Save as PNG, or **Overwrite** the original PNG or JPEG in place, in its own format.
-- **Batch** the same recipe over a folder, or over an ndisc-published
-  discography — with a live grid of every file it would touch and a dry run. It never writes over
-  your source.
+- **Batch** the same recipe over a folder, a list of release folders (such
+  as ndisc's Export list), or an ndisc-published discography, with a live
+  grid of every file it would touch and a dry run. It never writes over
+  your source. Framings: **Cover** and **Fit** write a square PNG (with an
+  optional disc); **Cap** shrinks oversized images, **Square** crops
+  off-square ones to their centre, and **Pad** fills them out to a square;
+  these three keep each file's format and skip files they would not change.
 
-Output is always PNG (the disc mask needs alpha).
+Save PNG… always writes PNG (the disc mask needs alpha); Overwrite keeps the
+original's format.
 
 ## Install
 
