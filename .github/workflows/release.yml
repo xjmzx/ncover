@@ -74,7 +74,7 @@ jobs:
           Section: graphics
           Priority: optional
           Architecture: amd64
-          Depends: libgtk-4-1 (>= 4.10), libx11-6, libx11-xcb1, libxcb1, libxcursor1
+          Depends: libgtk-4-1 (>= 4.12), libx11-6, libx11-xcb1, libxcb1, libxcursor1
           Maintainer: xjmzx <noreply@users.noreply.github.com>
           Homepage: https://github.com/xjmzx/ncover
           Description: Colour picker and cover / label artwork tool

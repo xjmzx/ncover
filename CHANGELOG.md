@@ -11,6 +11,11 @@ to diverge. Its version numbers are independent of these.
 
 ## [Unreleased]
 
+### Fixed
+- The `.deb` declared GTK 4.10 or newer, but since 0.4.0 the app needs 4.12
+  (the Batch grid). It now requires `libgtk-4-1 (>= 4.12)`, so apt refuses
+  the install on 4.10 or 4.11 instead of the app failing to start.
+
 ## [0.4.0] — 2026-11-19
 
 ### Removed
