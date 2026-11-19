@@ -132,10 +132,19 @@ porting further features across.
 - **Cap is not a framing onto a square, and it must not write what it does
   not change.** `Framing::Cap` returns `Ok(None)` from `batch_one` for a file
   within the cap, and keeps the source's name, extension and format
-  (`plan_for`, `cap_format`). Its count (`cap_survey`) and the run decide
+  (`plan_for`, `cap_format`). Its count (`change_survey`) and the run decide
   "within the cap" from the same `image_dims` header read and `cap_size`, and
   an ignored test checks that against the real catalogue. Keep it that way, or
   "Run (245 of 2377 to shrink)" stops being true.
+- **Square follows Cap's rules** (`Framing::keeps_file`): same name and
+  format, `Ok(None)` for a file already square, and its count
+  (`change_survey`) and the run both ask `would_change`. Its crop is the
+  centre of the long side; a cover that needs another crop is the editor's
+  job, not Batch's.
+- **A list scope is still one walk.** `Scope::list` turns each selected line
+  into a walk root, and `Scope::only` makes a root contribute just the cover
+  file the line names. The framing chooses the lines (`Framing::job` →
+  `ncover:<job>`), so under a list the framing is part of `scope_key`.
 - **`image_dims` parses PNG and JPEG headers by hand on purpose.**
   gdk-pixbuf's `file_info` reads far into a JPEG: 14 s for 2,400 covers
   against 0.1 s here. It falls back to `file_info` for anything else.
@@ -177,8 +186,9 @@ porting further features across.
 - **It consumes `ndisc` output.** Batch can run a recipe over an ndisc-published
   discography, which makes it a downstream reader of the publish manifest. It
   publishes nothing itself and holds no keys.
-- **Output is always PNG.** Not a preference — the disc / label mask needs an
-  alpha channel.
+- **Cover / Fit output is always PNG.** Not a preference — the disc / label
+  mask needs an alpha channel. Cap and Square are the exception: they tidy a
+  file, so they keep its format.
 - **Upstream lineage is real.** Forked from `xcolor` and MIT-licensed;
   CLI-side changes may have an upstream counterpart worth checking rather than
   reinventing.

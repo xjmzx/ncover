@@ -30,6 +30,30 @@ pub(crate) enum Framing {
     /// two would crop or pad every non-square cover, enlarge every small one
     /// and turn 66 KB JPEGs into 420 KB PNGs.
     Cap,
+    /// Crop a non-square image to a square of its shorter side, taking the
+    /// centre of the long side, then shrink it to `Recipe::canvas` if it is
+    /// still larger, as Cap does. Keeps the file's name and format and writes
+    /// nothing for an image that is already square. Meant for "a select
+    /// few" (a list scope), since a centre crop is a per-cover judgement.
+    Square,
+}
+
+impl Framing {
+    /// Cap and Square tidy a file in place: same name, same format, and a
+    /// file they would not change is not written at all.
+    pub(crate) fn keeps_file(self) -> bool {
+        matches!(self, Framing::Cap | Framing::Square)
+    }
+
+    /// The `ncover:<job>` action this framing carries out in ndisc's cover
+    /// list. Cover and Fit are not jobs ndisc asks for.
+    pub(crate) fn job(self) -> Option<&'static str> {
+        match self {
+            Framing::Cap => Some("cap"),
+            Framing::Square => Some("square"),
+            Framing::Cover | Framing::Fit => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -141,6 +165,191 @@ pub(crate) fn load_manifest(path: &Path) -> Result<Manifest> {
     Ok(m)
 }
 
+/// One named file, under the same rules as the walk: an image extension, and
+/// the name filter. A file the list names but the disk does not have is an
+/// error for its root, so the survey counts it as unreadable rather than
+/// quietly as "matched nothing".
+fn named_image(file: &Path, needle: &str, into: &mut Vec<PathBuf>) -> Result<()> {
+    if !file.is_file() {
+        anyhow::bail!("the list names {}, which is not there", file.display());
+    }
+    let name = file.file_name().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    let ext_ok = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .is_some_and(|e| IMAGE_EXTS.contains(&e.as_str()));
+    if ext_ok && (needle.is_empty() || name.contains(&needle.to_lowercase())) {
+        into.push(file.to_path_buf());
+    }
+    Ok(())
+}
+
+// ---------- a cover list (ndisc's Export list) ----------
+//
+// ndisc's "Local covers vs Blossom" exports one line per release, no header,
+// tab-separated: folder · cover file · artist — title · disk WxH · published
+// WxH · format · kinds · actions, with `-` for an empty field. Only ndisc knows
+// what is published, so the list is how it says which covers need work;
+// ncover reads it and never ndisc's database. A hand-made list of folders,
+// one per line, works too: every column after the first is optional.
+
+/// The actions vocabulary, in run order. ncover acts on the `ncover:` ones;
+/// the rest are counted so the survey can say what is someone else's.
+pub(crate) const LIST_ACTIONS: [(&str, &str); 7] = [
+    ("resource", "need a new source"),
+    ("review", "to review"),
+    ("ncover:square", "to square"),
+    ("ncover:cap", "to cap"),
+    ("ncover:convert", "to convert"),
+    ("ndisc:reconcile", "for ndisc to reconcile"),
+    ("ndisc:upload", "for ndisc to upload"),
+];
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ListLine {
+    pub(crate) folder: PathBuf,
+    /// The release's cover, when the line names one. Otherwise the folder is
+    /// walked like any other root.
+    pub(crate) cover: Option<PathBuf>,
+    /// "Artist — Title", for the Files list.
+    pub(crate) name: Option<String>,
+    pub(crate) actions: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CoverList {
+    pub(crate) lines: Vec<ListLine>,
+    /// The folders' common parent: the mirror prefix and the guard boundary.
+    pub(crate) root: PathBuf,
+    /// Whether any line carries an actions column. Without one, every line
+    /// is in every run.
+    pub(crate) has_actions: bool,
+    /// Lines that could not be used (not an absolute folder), with the line
+    /// number, so a bad list says so instead of shrinking quietly.
+    pub(crate) skipped: Vec<usize>,
+}
+
+impl CoverList {
+    pub(crate) fn selects(&self, line: &ListLine, job: Option<&str>) -> bool {
+        match job {
+            Some(j) if self.has_actions => {
+                let want = format!("ncover:{j}");
+                line.actions.iter().any(|a| *a == want)
+            }
+            _ => true,
+        }
+    }
+
+    /// What a run of `job` leaves out, by each line's first action in run
+    /// order: "247 to square · 112 need a new source". Counted, not touched.
+    pub(crate) fn left_out(&self, job: Option<&str>) -> String {
+        if !self.has_actions || job.is_none() {
+            return String::new();
+        }
+        let mut counts = [0usize; LIST_ACTIONS.len()];
+        let mut none = 0;
+        for line in self.lines.iter().filter(|l| !self.selects(l, job)) {
+            match LIST_ACTIONS.iter().position(|(a, _)| line.actions.iter().any(|x| x == a)) {
+                Some(i) => counts[i] += 1,
+                None => none += 1,
+            }
+        }
+        let mut parts: Vec<String> = LIST_ACTIONS
+            .iter()
+            .zip(counts)
+            .filter(|(_, n)| *n > 0)
+            .map(|((_, what), n)| format!("{n} {what}"))
+            .collect();
+        if none > 0 {
+            parts.push(format!("{none} with nothing to do"));
+        }
+        parts.join(" \u{b7} ")
+    }
+}
+
+/// A list field, or `None` for an empty one or ndisc's `-`.
+fn list_field(s: Option<&str>) -> Option<&str> {
+    s.map(str::trim).filter(|v| !v.is_empty() && *v != "-")
+}
+
+pub(crate) fn parse_cover_list(text: &str) -> CoverList {
+    let field = list_field;
+    let mut lines = Vec::new();
+    let mut skipped = Vec::new();
+    let mut has_actions = false;
+    for (i, raw) in text.lines().enumerate() {
+        let raw = raw.trim_end_matches('\r');
+        if raw.trim().is_empty() || raw.trim_start().starts_with('#') {
+            continue;
+        }
+        let cols: Vec<&str> = raw.split('\t').collect();
+        let folder = PathBuf::from(cols[0].trim());
+        if !folder.is_absolute() {
+            skipped.push(i + 1);
+            continue;
+        }
+        // The second column is the cover file only when it is one: an image
+        // path inside the folder. A hand-made list's notes are ignored.
+        let cover = field(cols.get(1).copied()).map(PathBuf::from).filter(|p| {
+            p.starts_with(&folder)
+                && p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| IMAGE_EXTS.contains(&e.to_lowercase().as_str()))
+        });
+        let actions: Vec<String> = match cols.get(7) {
+            Some(a) => {
+                has_actions = true;
+                field(Some(a))
+                    .map(|a| a.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+                    .unwrap_or_default()
+            }
+            None => Vec::new(),
+        };
+        lines.push(ListLine {
+            folder,
+            cover,
+            name: field(cols.get(2).copied()).map(str::to_string),
+            actions,
+        });
+    }
+    let root = common_parent(lines.iter().map(|l| l.folder.as_path()));
+    CoverList { lines, root, has_actions, skipped }
+}
+
+pub(crate) fn load_cover_list(path: &Path) -> Result<CoverList> {
+    let text = fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let l = parse_cover_list(&text);
+    if l.lines.is_empty() {
+        anyhow::bail!("{} holds no release folders", path.display());
+    }
+    Ok(l)
+}
+
+/// The deepest folder that holds every folder's PARENT, so the output keeps
+/// at least one level of each release's path: a one-line list mirrors to
+/// `<release>/cover.jpg`, not to a bare `cover.jpg`.
+fn common_parent<'a>(folders: impl Iterator<Item = &'a Path>) -> PathBuf {
+    let mut root: Option<PathBuf> = None;
+    for f in folders {
+        let parent = f.parent().unwrap_or(f);
+        root = Some(match root {
+            None => parent.to_path_buf(),
+            Some(r) => {
+                let mut c = PathBuf::new();
+                for (a, b) in r.components().zip(parent.components()) {
+                    if a != b {
+                        break;
+                    }
+                    c.push(a.as_os_str());
+                }
+                c
+            }
+        });
+    }
+    root.unwrap_or_else(|| PathBuf::from("/"))
+}
+
 /// Where a batch run gets its images, and what to strip to mirror the tree.
 ///
 /// The distinction the two scopes share is exactly this: a set of roots to walk,
@@ -158,6 +367,10 @@ pub(crate) struct Scope {
     /// Display names for walk roots, where something better than the path is
     /// known: "Artist — Title" from the manifest. Empty for a folder.
     pub(crate) names: HashMap<PathBuf, String>,
+    /// Walk roots that contribute ONE named file instead of a walk: a list's
+    /// `cover file` column, so a release's back or inlay is never touched.
+    /// Empty for a folder or the manifest.
+    pub(crate) only: HashMap<PathBuf, PathBuf>,
 }
 
 impl Scope {
@@ -167,6 +380,7 @@ impl Scope {
             strip: root.clone(),
             guard_root: root,
             names: HashMap::new(),
+            only: HashMap::new(),
         }
     }
 
@@ -188,7 +402,33 @@ impl Scope {
                     _ => None,
                 })
                 .collect(),
+            only: HashMap::new(),
         }
+    }
+
+    /// The lines of a cover list this run would act on: the ones whose
+    /// actions include `ncover:<job>`. A list without an actions column (a
+    /// hand-made one), or a framing that is not a job (Cover, Fit), takes
+    /// every line. Each line's folder is a walk root; where the line names
+    /// its cover file, that file is the only one taken from the folder.
+    pub(crate) fn list(l: &CoverList, job: Option<&str>) -> Scope {
+        let mut s = Scope {
+            roots: Vec::new(),
+            strip: l.root.clone(),
+            guard_root: l.root.clone(),
+            names: HashMap::new(),
+            only: HashMap::new(),
+        };
+        for line in l.lines.iter().filter(|line| l.selects(line, job)) {
+            s.roots.push(line.folder.clone());
+            if let Some(n) = &line.name {
+                s.names.insert(line.folder.clone(), n.clone());
+            }
+            if let Some(f) = &line.cover {
+                s.only.insert(line.folder.clone(), f.clone());
+            }
+        }
+        s
     }
 
     /// What to call a walk root in the survey: the manifest's name, else its
@@ -229,7 +469,11 @@ pub(crate) fn walk_scope(scope: &Scope, needle: &str) -> (Vec<(usize, PathBuf)>,
     let mut errors = Vec::new();
     for (i, root) in scope.roots.iter().enumerate() {
         let mut found = Vec::new();
-        if let Err(e) = find_images(root, needle, &mut found) {
+        if let Some(file) = scope.only.get(root) {
+            if let Err(e) = named_image(file, needle, &mut found) {
+                errors.push((root.clone(), format!("{e:#}")));
+            }
+        } else if let Err(e) = find_images(root, needle, &mut found) {
             errors.push((root.clone(), format!("{e:#}")));
         }
         for f in found {
@@ -415,6 +659,18 @@ pub(crate) fn batch_render(src: &Path, r: Recipe) -> Result<gdk_pixbuf::Pixbuf> 
                 None => Ok(pb),
             };
         }
+        Framing::Square => {
+            let pb = pb.apply_embedded_orientation().unwrap_or(pb);
+            let (w, h) = (pb.width(), pb.height());
+            let side = w.min(h);
+            let sq = pb.new_subpixbuf((w - side) / 2, (h - side) / 2, side, side).copy()
+                .context("could not crop to a square")?;
+            return if side > r.canvas {
+                area_resample(&sq, r.canvas, r.canvas)
+            } else {
+                Ok(sq)
+            };
+        }
     };
     let framed = compose(&pb, place, r.canvas)?;
     match r.disc {
@@ -530,18 +786,26 @@ pub(crate) fn image_dims(path: &Path) -> Option<(i32, i32)> {
 /// cannot be read counts as "would change": the run will open it properly,
 /// and either shrink it or fail it with the reason. Returns the count and the
 /// first `first_n` such files in run order, for the sample.
-pub(crate) fn cap_survey(files: &[PathBuf], cap: i32, first_n: usize) -> (usize, Vec<PathBuf>) {
+/// Would a Cap or Square run write this file? From the header alone, and the
+/// same answer `batch_one` acts on. Unreadable headers say yes: the run opens
+/// the file properly and either changes it or fails it with the reason.
+pub(crate) fn would_change(f: &Path, r: Recipe) -> bool {
+    if is_svg(f) {
+        return false;
+    }
+    match (r.framing, image_dims(f)) {
+        (Framing::Cap, Some((w, h))) => cap_size(w, h, r.canvas).is_some(),
+        (Framing::Square, Some((w, h))) => w != h,
+        _ => true,
+    }
+}
+
+/// `cap_survey` for either framing that leaves files alone.
+pub(crate) fn change_survey(files: &[PathBuf], r: Recipe, first_n: usize) -> (usize, Vec<PathBuf>) {
     let mut over = 0;
     let mut first = Vec::new();
     for f in files {
-        if is_svg(f) {
-            continue;
-        }
-        let changes = match image_dims(f) {
-            Some((w, h)) => cap_size(w, h, cap).is_some(),
-            None => true,
-        };
-        if changes {
+        if would_change(f, r) {
             over += 1;
             if first.len() < first_n {
                 first.push(f.clone());
@@ -555,7 +819,7 @@ pub(crate) fn cap_survey(files: &[PathBuf], cap: i32, first_n: usize) -> (usize,
 /// and extension (it writes the same format back), so sources are already
 /// distinct; the other framings write PNG and go through `plan_dests`.
 pub(crate) fn plan_for(rels: &[PathBuf], r: Recipe) -> Vec<std::result::Result<PathBuf, String>> {
-    if r.framing == Framing::Cap {
+    if r.framing.keeps_file() {
         rels.iter().map(|p| Ok(p.clone())).collect()
     } else {
         plan_dests(rels, r.disc.is_some())
@@ -576,20 +840,16 @@ pub(crate) fn shared_names(rels: &[PathBuf]) -> usize {
 /// renders (so it still fails on a file that would really fail) but does
 /// everything except write.
 ///
-/// `Ok(None)` means "left alone": only Cap does that, for a file already
-/// within the cap (or a vector, which has no pixel size to cap).
+/// `Ok(None)` means "left alone": only Cap and Square do that, for a file
+/// already within the cap or already square (or a vector, which has no
+/// pixel size).
 pub(crate) fn batch_one(src: &Path, dest: &Path, r: Recipe, dry: bool) -> Result<Option<PathBuf>> {
     let dest = dest.to_path_buf();
-    let format = if r.framing == Framing::Cap {
-        if is_svg(src) {
+    let format = if r.framing.keeps_file() {
+        // The header is enough to know a file needs nothing (within the cap,
+        // already square), so most of a library is never decoded.
+        if !would_change(src, r) {
             return Ok(None);
-        }
-        // The header is enough to know a file is within the cap, so the
-        // ~90% of a library that needs nothing is never decoded.
-        if let Some((w, h)) = image_dims(src) {
-            if cap_size(w, h, r.canvas).is_none() {
-                return Ok(None);
-            }
         }
         cap_format(src)?
     } else {
@@ -642,7 +902,7 @@ fn cap_format(src: &Path) -> Result<(&'static str, Vec<(&'static str, &'static s
         "jpg" | "jpeg" => Ok(("jpeg", vec![("quality", "92")])),
         "png" => Ok(("png", Vec::new())),
         _ => Err(anyhow::anyhow!(format!(
-            "Cap keeps the file's format and cannot write .{ext}; left as it is"
+            "Cap and Square keep the file's format and cannot write .{ext}; left as it is"
         ))),
     }
 }
@@ -872,7 +1132,7 @@ mod batch_tests {
         solid(600, 600, false, 0xffffffff).savev(base.join("b.jpg"), "jpeg", &[]).unwrap();
         solid(900, 300, false, 0xffffffff).savev(base.join("c.png"), "png", &[]).unwrap();
         let files: Vec<PathBuf> = ["a.jpg", "b.jpg", "c.png"].iter().map(|f| base.join(f)).collect();
-        let (over, first) = cap_survey(&files, 800, 4);
+        let (over, first) = change_survey(&files, Recipe { canvas: 800, framing: Framing::Cap, disc: None }, 4);
         assert_eq!(over, 2);
         assert_eq!(first, [base.join("a.jpg"), base.join("c.png")]);
         // And it agrees with what the run does, file by file.
@@ -1055,7 +1315,7 @@ mod batch_tests {
         println!("header reader disagrees with gdk-pixbuf on {} files: {mismatched:?}", mismatched.len());
         for cap in [800, 600] {
             let t = std::time::Instant::now();
-            let (over, _) = cap_survey(&files, cap, 4);
+            let (over, _) = change_survey(&files, Recipe { canvas: cap, framing: Framing::Cap, disc: None }, 4);
             let survey_ms = t.elapsed().as_millis();
             let r = Recipe { canvas: cap, framing: Framing::Cap, disc: None };
             let rels: Vec<PathBuf> = files.iter().map(|f| f.strip_prefix(&scope.strip).unwrap().to_path_buf()).collect();
@@ -1363,6 +1623,7 @@ mod batch_tests {
             strip: root.clone(),
             guard_root: root,
             names: HashMap::new(),
+            only: HashMap::new(),
         };
         let s = survey_batch(&scope, "", 4);
         assert_eq!(s.total, 1, "the count must match what a run writes");
@@ -1408,5 +1669,157 @@ mod batch_tests {
         fs::write(src.join("broken-cover.png"), b"not a png").unwrap();
         let bad = Path::new("broken-cover.png");
         assert!(batch_one(&src.join(bad), &batch_dest(bad, &out, false), r, true).is_err());
+    }
+
+    // ---------- cover lists and Square ----------
+
+    const EXPORT: &str = "\
+/lib/A/One\t/lib/A/One/cover.jpg\tA \u{2014} One\t600x535\t600x535\t-\toff-square-10.8%\tncover:square
+/lib/B/Two\t/lib/B/Two/cover.png\tB \u{2014} Two\t1200x1200\t1200x1200\tpng\tover-600,png\tncover:cap,ncover:convert
+/lib/C/Three\t-\tC \u{2014} Three\t-\t600x600\t-\tno-local\tresource
+/lib/D/Four\t/lib/D/Four/cover.jpg\tD \u{2014} Four\t400x392\t600x598\t-\tdifferent-picture\treview
+relative/folder\t-\t-
+";
+
+    #[test]
+    fn a_cover_list_reads_ndiscs_export_columns() {
+        let l = parse_cover_list(EXPORT);
+        assert_eq!(l.lines.len(), 4);
+        assert_eq!(l.skipped, [5], "a relative folder is reported, not used");
+        assert!(l.has_actions);
+        assert_eq!(l.root, PathBuf::from("/lib"), "the folders' common parent");
+        let a = &l.lines[0];
+        assert_eq!(a.cover.as_deref(), Some(Path::new("/lib/A/One/cover.jpg")));
+        assert_eq!(a.name.as_deref(), Some("A \u{2014} One"));
+        assert_eq!(a.actions, ["ncover:square"]);
+        assert_eq!(l.lines[1].actions, ["ncover:cap", "ncover:convert"]);
+        assert_eq!(l.lines[2].cover, None, "`-` is an empty field");
+    }
+
+    #[test]
+    fn a_hand_made_list_of_folders_takes_every_line() {
+        let l = parse_cover_list("/m/x/Release\n\n# a note\n/m/y/Other\tsome note\n");
+        assert_eq!(l.lines.len(), 2);
+        assert!(!l.has_actions);
+        assert_eq!(l.lines[1].cover, None, "a note in column two is not a cover file");
+        assert_eq!(l.root, PathBuf::from("/m"));
+        assert_eq!(Scope::list(&l, Some("square")).roots.len(), 2);
+        assert_eq!(l.left_out(Some("square")), "");
+        // One folder still mirrors to <release>/cover.jpg, not a bare name.
+        assert_eq!(parse_cover_list("/m/x/Release\n").root, PathBuf::from("/m/x"));
+    }
+
+    #[test]
+    fn the_framing_picks_the_lines_and_counts_the_rest() {
+        let l = parse_cover_list(EXPORT);
+        let sq = Scope::list(&l, Framing::Square.job());
+        assert_eq!(sq.roots, [PathBuf::from("/lib/A/One")]);
+        assert_eq!(sq.names[&PathBuf::from("/lib/A/One")], "A \u{2014} One");
+        assert_eq!(Scope::list(&l, Framing::Cap.job()).roots, [PathBuf::from("/lib/B/Two")]);
+        assert_eq!(Scope::list(&l, Framing::Cover.job()).roots.len(), 4, "Cover is no job: every line");
+        assert_eq!(
+            l.left_out(Framing::Square.job()),
+            "1 need a new source \u{b7} 1 to review \u{b7} 1 to cap"
+        );
+    }
+
+    #[test]
+    fn a_list_takes_only_the_named_cover_and_the_count_matches_the_run() {
+        let root = tmpdir("list-scope");
+        let rel = root.join("Artist/Release");
+        fs::create_dir_all(&rel).unwrap();
+        solid(600, 535, false, 0xffffffff).savev(rel.join("cover.jpg"), "jpeg", &[]).unwrap();
+        solid(600, 535, false, 0xffffffff).savev(rel.join("back-cover.jpg"), "jpeg", &[]).unwrap();
+        let gone = root.join("Artist/Gone");
+        let text = format!(
+            "{r}\t{r}/cover.jpg\tArtist \u{2014} Release\t-\t-\t-\t-\tncover:square\n\
+             {g}\t{g}/cover.jpg\tArtist \u{2014} Gone\t-\t-\t-\t-\tncover:square\n",
+            r = rel.display(),
+            g = gone.display()
+        );
+        let scope = Scope::list(&parse_cover_list(&text), Some("square"));
+        let s = survey_batch(&scope, "cover", 4);
+        assert_eq!(s.total, 1, "the back cover is never taken");
+        assert_eq!(s.files, [rel.join("cover.jpg")]);
+        assert_eq!(s.unreadable, 1, "a named file that is missing is counted, not hidden");
+        assert_eq!(s.total, find_in_scope(&scope, "cover").0.len());
+        // Both folders sit under Artist, so that is the mirror prefix.
+        assert_eq!(s.groups[0].files, ["Release/cover.jpg"], "mirrored under the common parent");
+    }
+
+    #[test]
+    fn square_crops_the_centre_keeps_the_format_and_skips_square_files() {
+        let base = tmpdir("square");
+        let out = tmpdir("square-out");
+        // 30×10: the centre square is x 10..20. Mark its corners.
+        let wide = solid(30, 10, false, 0x000000ff);
+        set(&wide, 10, 0, [255, 0, 0, 255]);
+        set(&wide, 19, 9, [0, 255, 0, 255]);
+        wide.savev(base.join("wide.png"), "png", &[]).unwrap();
+        solid(600, 535, false, 0x808080ff).savev(base.join("insert.jpg"), "jpeg", &[]).unwrap();
+        solid(1000, 800, false, 0x808080ff).savev(base.join("big.png"), "png", &[]).unwrap();
+        solid(500, 500, false, 0x808080ff).savev(base.join("square.jpg"), "jpeg", &[]).unwrap();
+        let r = Recipe { canvas: 600, framing: Framing::Square, disc: None };
+
+        let w = batch_one(&base.join("wide.png"), &out.join("wide.png"), r, false).unwrap().unwrap();
+        let pb = gdk_pixbuf::Pixbuf::from_file(&w).unwrap();
+        assert_eq!((pb.width(), pb.height()), (10, 10));
+        let px = |x: i32, y: i32| {
+            let n = pb.n_channels() as usize;
+            let i = y as usize * pb.rowstride() as usize + x as usize * n;
+            let b = unsafe { pb.pixels() };
+            [b[i], b[i + 1], b[i + 2]]
+        };
+        assert_eq!(px(0, 0), [255, 0, 0], "the crop starts at the centre, not the edge");
+        assert_eq!(px(9, 9), [0, 255, 0]);
+
+        let j = batch_one(&base.join("insert.jpg"), &out.join("insert.jpg"), r, false).unwrap().unwrap();
+        assert_eq!(image_dims(&j), Some((535, 535)), "smaller than the size: cropped, not enlarged");
+        assert_eq!(fs::read(&j).unwrap()[..2], [0xFF, 0xD8], "JPEG stays JPEG");
+
+        let b = batch_one(&base.join("big.png"), &out.join("big.png"), r, false).unwrap().unwrap();
+        assert_eq!(image_dims(&b), Some((600, 600)), "cropped to 800, then held to the size");
+
+        assert_eq!(batch_one(&base.join("square.jpg"), &out.join("square.jpg"), r, false).unwrap(), None);
+        assert!(!out.join("square.jpg").exists(), "a square file is not written at all");
+
+        // The survey's count is what the run writes.
+        let files: Vec<PathBuf> =
+            ["big.png", "insert.jpg", "square.jpg", "wide.png"].iter().map(|f| base.join(f)).collect();
+        assert_eq!(change_survey(&files, r, 4).0, 3);
+        assert_eq!(plan_for(&[PathBuf::from("a/cover.jpg")], r), [Ok(PathBuf::from("a/cover.jpg"))]);
+    }
+
+    #[test]
+    #[ignore] // reads a real cover list: NCOVER_LIST=<ndisc export> cargo test -p ncover real_list -- --ignored --nocapture
+    fn real_list_counts_agree_with_the_run() {
+        let path = PathBuf::from(std::env::var("NCOVER_LIST").expect("set NCOVER_LIST"));
+        let l = load_cover_list(&path).unwrap();
+        println!("{} lines under {} ({} skipped)", l.lines.len(), l.root.display(), l.skipped.len());
+        for f in [Framing::Square, Framing::Cap] {
+            let r = Recipe { canvas: 600, framing: f, disc: None };
+            let scope = Scope::list(&l, f.job());
+            let s = survey_batch(&scope, "cover", 4);
+            let (change, _) = change_survey(&s.files, r, 4);
+            println!(
+                "{f:?}: {} lines, {} files, {} unreadable, {change} would change; not in this run: {}",
+                scope.roots.len(),
+                s.total,
+                s.unreadable,
+                l.left_out(f.job())
+            );
+            // Dry-run every file: the count the button shows is what a run writes.
+            let rels: Vec<PathBuf> =
+                s.files.iter().map(|x| x.strip_prefix(&scope.strip).unwrap().to_path_buf()).collect();
+            let out = std::env::temp_dir().join("ncover-real-list-dry");
+            let mut written = 0;
+            for ((src, rel), dest) in s.files.iter().zip(&rels).zip(plan_for(&rels, r)) {
+                let _ = rel;
+                if let Ok(Some(_)) = batch_one(src, &out.join(dest.unwrap()), r, true) {
+                    written += 1;
+                }
+            }
+            assert_eq!(written, change, "{f:?}: the survey and the dry run disagree");
+        }
     }
 }

@@ -11,6 +11,24 @@ to diverge. Its version numbers are independent of these.
 
 ## [Unreleased]
 
+### Added
+- **Batch scope "From a list…"**: a text file with one release folder per
+  line, such as ndisc's Export list from Local covers vs Blossom. Where a
+  line names its cover file, only that file is taken, so a release's back
+  or inlay is never touched. Its "Artist — Title" names the release in the
+  Files list, and the output mirrors the folders under their common parent.
+  A hand-made list of folders works too.
+- **The framing picks the lines.** When the list carries ndisc's actions
+  column, Cap takes only the lines marked `ncover:cap` and Square only
+  those marked `ncover:square`. The survey line counts the rest without
+  touching them ("not in this run: 112 need a new source · 24 to review …").
+- **Square**, a fourth batch framing. It crops a non-square image to a
+  square of its shorter side, taken from the centre, then shrinks it to the
+  size if it is still larger (area averaging, as Cap). It keeps the file's
+  name and format (JPEG stays JPEG at quality 92) and writes nothing for an
+  image that is already square. The Run button, the samples and the dry run
+  say how many it would change ("Run (247 of 247 to square)").
+
 ## [0.3.0] — 2026-11-13
 
 ### Added

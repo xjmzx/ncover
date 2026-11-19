@@ -850,18 +850,21 @@ fn build_batch(
     // ndisc's manifest, loaded when you switch to that scope and reused at run,
     // so the count you saw and the set you process are the same read.
     let manifest: Rc<RefCell<Option<Manifest>>> = Rc::new(RefCell::new(None));
+    // A cover list (ndisc's Export list), with the file it came from.
+    let list: Rc<RefCell<Option<(PathBuf, CoverList)>>> = Rc::new(RefCell::new(None));
 
     let body = GBox::new(Orientation::Vertical, 8);
     body.set_margin_top(6);
 
-    // --- scope: a folder, or ndisc's published discography ---
+    // --- scope: a folder, a cover list, or ndisc's published discography ---
     // The published option is only offered when ndisc has actually exported a
     // manifest. A scope that can only ever match nothing is worse than no scope.
+    // Indices: 0 folder, 1 list, 2 published.
     let has_manifest = published_manifest_path().is_some();
     let scope_names: &[&str] = if has_manifest {
-        &["Folder", "Published discography"]
+        &["Folder", "From a list\u{2026}", "Published discography"]
     } else {
-        &["Folder"]
+        &["Folder", "From a list\u{2026}"]
     };
     let row_scope = GBox::new(Orientation::Horizontal, 6);
     let scope_lbl = Label::new(Some("Scope"));
@@ -869,12 +872,10 @@ fn build_batch(
     row_scope.append(&scope_lbl);
     let dd_scope = gtk::DropDown::from_strings(scope_names);
     dd_scope.set_tooltip_text(Some(
-        "Folder — any tree of artwork.\n\nPublished discography — the exact releases ndisc has published to Nostr, read from the suite's published.json. Its covers, mirrored to your output folder.",
+        "Folder — any tree of artwork.\n\nFrom a list… — a text file with one release folder per line, such as ndisc's Export list from Local covers vs Blossom. Where a line names its cover file, only that file is taken. Where it names actions, Cap and Square take only the lines marked ncover:cap or ncover:square, and the rest are counted.\n\nPublished discography — the exact releases ndisc has published to Nostr, read from the suite's published.json. Its covers, mirrored to your output folder.",
     ));
     row_scope.append(&dd_scope);
     row_scope.set_hexpand(true);
-    // Only worth a row when there is a choice to make.
-    row_scope.set_visible(has_manifest);
     body.append(&row_scope);
 
     // --- folders ---
@@ -916,9 +917,9 @@ fn build_batch(
     ));
     row_r.append(&e_match);
 
-    let dd_frame = gtk::DropDown::from_strings(&["Cover", "Fit", "Cap"]);
+    let dd_frame = gtk::DropDown::from_strings(&["Cover", "Fit", "Cap", "Square"]);
     dd_frame.set_tooltip_text(Some(
-        "Cover fills the square (edges cropped); Fit puts the whole image inside it. Both write a square PNG at the size.\n\nCap shrinks only images larger than the size, keeping their shape and format (JPEG stays JPEG), and leaves the rest alone. Use it to tidy a library's covers.\n\nA dragged placement is about ONE image's dimensions, so it is not offered here.",
+        "Cover fills the square (edges cropped); Fit puts the whole image inside it. Both write a square PNG at the size.\n\nCap shrinks only images larger than the size, keeping their shape and format (JPEG stays JPEG), and leaves the rest alone. Use it to tidy a library's covers.\n\nSquare crops only images that are not square, to a square of their shorter side taken from the centre, then shrinks any larger than the size. It keeps the format and leaves square images alone. Meant for a chosen few, from a list.\n\nA dragged placement is about ONE image's dimensions, so it is not offered here.",
     ));
     row_r.append(&dd_frame);
 
@@ -1033,11 +1034,63 @@ fn build_batch(
     res_scroll.set_child(Some(&results));
     body.append(&res_scroll);
 
-    // Folder pickers.
-    for (btn, slot, lbl, title) in [
-        (&b_src, &src, &l_src, "Source folder"),
-        (&b_dst, &dst, &l_dst, "Output folder"),
-    ] {
+    // Under the list scope the source button picks the list, not a folder.
+    b_src.connect_clicked(clone!(
+        #[weak]
+        window,
+        #[strong]
+        src,
+        #[strong]
+        list,
+        #[weak]
+        l_src,
+        #[weak]
+        dd_scope,
+        move |_| {
+            let as_list = dd_scope.selected() == 1;
+            let dlg = gtk::FileDialog::builder()
+                .title(if as_list { "Cover list" } else { "Source folder" })
+                .build();
+            let done = clone!(
+                #[weak]
+                window,
+                #[strong]
+                src,
+                #[strong]
+                list,
+                #[weak]
+                l_src,
+                move |res: std::result::Result<gio::File, glib::Error>| {
+                    let Ok(f) = res else { return };
+                    let Some(p) = f.path() else { return };
+                    if !as_list {
+                        l_src.set_text(&p.display().to_string());
+                        *src.borrow_mut() = Some(p);
+                        return;
+                    }
+                    match load_cover_list(&p) {
+                        Ok(l) => {
+                            l_src.set_text(&list_readout(&p, &l));
+                            *list.borrow_mut() = Some((p, l));
+                        }
+                        Err(e) => {
+                            *list.borrow_mut() = None;
+                            l_src.set_text("no list");
+                            show_error(&window, &format!("{e:#}"));
+                        }
+                    }
+                }
+            );
+            if as_list {
+                dlg.open(Some(&window), gio::Cancellable::NONE, done);
+            } else {
+                dlg.select_folder(Some(&window), gio::Cancellable::NONE, done);
+            }
+        }
+    ));
+
+    // The output picker.
+    for (btn, slot, lbl, title) in [(&b_dst, &dst, &l_dst, "Output folder")] {
         btn.connect_clicked(clone!(
             #[weak]
             window,
@@ -1074,10 +1127,12 @@ fn build_batch(
     // (count + library root), because there is nothing to pick: the set is
     // ndisc's, not yours. Loaded HERE so a broken manifest is a plain message
     // now, not a surprise at run.
-    if has_manifest {
+    {
         dd_scope.connect_selected_notify(clone!(
             #[strong]
             manifest,
+            #[strong]
+            list,
             #[strong]
             src,
             #[weak]
@@ -1085,7 +1140,24 @@ fn build_batch(
             #[weak]
             l_src,
             move |dd| {
+                *src.borrow_mut() = None;
                 if dd.selected() == 1 {
+                    // A list is picked by hand; one already loaded stays.
+                    *manifest.borrow_mut() = None;
+                    b_src.set_label("List\u{2026}");
+                    b_src.set_tooltip_text(Some(
+                        "A text file, one release folder per line. ndisc's Export list (Local covers vs Blossom) is this format.",
+                    ));
+                    b_src.set_sensitive(true);
+                    l_src.set_text(&match list.borrow().as_ref() {
+                        Some((p, l)) => list_readout(p, l),
+                        None => "no list".to_string(),
+                    });
+                    return;
+                }
+                b_src.set_label("Source\u{2026}");
+                b_src.set_tooltip_text(Some("A folder of artwork. Searched recursively."));
+                if dd.selected() == 2 {
                     let loaded = published_manifest_path()
                         .ok_or_else(|| anyhow::anyhow!("published.json is gone"))
                         .and_then(|p| load_manifest(&p));
@@ -1107,9 +1179,9 @@ fn build_batch(
                     }
                 } else {
                     *manifest.borrow_mut() = None;
-                    // Clear the folder too, so the readout and the state agree —
-                    // a "no source folder" label over a still-set path is a lie.
-                    *src.borrow_mut() = None;
+                    // The folder was cleared above, so the readout and the
+                    // state agree: a "no source folder" label over a still-set
+                    // path is a lie.
                     b_src.set_sensitive(true);
                     l_src.set_text("no source folder");
                 }
@@ -1126,33 +1198,35 @@ fn build_batch(
     // in connection order, and this one is connected before the handler that
     // writes `canvas`, so reading the cell here would render the size you just
     // moved away from.
-    let note_from = |sel: u32, cap: bool| {
+    let note_from = |sel: u32, frame: u32| {
         let c = sane_canvas(
             CANVAS_SIZES
                 .get(sel as usize)
                 .copied()
                 .unwrap_or(CANVAS_DEFAULT),
         );
-        if cap {
+        if frame == 2 {
             format!("\u{2192} at most {c} px, same format")
+        } else if frame == 3 {
+            format!("\u{2192} square, at most {c} px, same format")
         } else {
             format!("\u{2192} {c}\u{d7}{c} PNG")
         }
     };
-    size_note.set_text(&note_from(size_dd.selected(), false));
+    size_note.set_text(&note_from(size_dd.selected(), 0));
     size_dd.connect_selected_notify(clone!(
         #[weak(rename_to = note)]
         size_note,
         #[weak]
         dd_frame,
-        move |dd| note.set_text(&note_from(dd.selected(), dd_frame.selected() == 2))
+        move |dd| note.set_text(&note_from(dd.selected(), dd_frame.selected()))
     ));
     dd_frame.connect_selected_notify(clone!(
         #[weak(rename_to = note)]
         size_note,
         #[weak]
         size_dd,
-        move |dd| note.set_text(&note_from(size_dd.selected(), dd.selected() == 2))
+        move |dd| note.set_text(&note_from(size_dd.selected(), dd.selected()))
     ));
 
     // Where the images come from — folder or manifest. Shared by Run, Preview,
@@ -1161,10 +1235,20 @@ fn build_batch(
     // shows that string as a dialog.
     let scope_now: Rc<dyn Fn() -> std::result::Result<Scope, String>> = {
         let dd_scope = dd_scope.clone();
+        let dd_frame = dd_frame.clone();
         let manifest = manifest.clone();
+        let list = list.clone();
         let src = src.clone();
         Rc::new(move || {
             if dd_scope.selected() == 1 {
+                // The framing picks the lines: Cap takes ncover:cap, Square
+                // ncover:square. So the scope follows the framing dropdown.
+                return match list.borrow().as_ref() {
+                    Some((_, l)) => Ok(Scope::list(l, framing_at(dd_frame.selected()).job())),
+                    None => Err("Choose a cover list.".into()),
+                };
+            }
+            if dd_scope.selected() == 2 {
                 match manifest.borrow().as_ref() {
                     Some(m) => Ok(Scope::published(m)),
                     None => Err("The published discography could not be read. Re-select the scope, or point ndisc at Export.".into()),
@@ -1212,13 +1296,12 @@ fn build_batch(
                     _ => return Err("A gradient needs two colours — pick a second one.".into()),
                 },
             };
-            let framing = match dd_frame.selected() {
-                1 => Framing::Fit,
-                2 => Framing::Cap,
-                _ => Framing::Cover,
-            };
+            let framing = framing_at(dd_frame.selected());
             if framing == Framing::Cap && disc.is_some() {
                 return Err("Cap keeps each image's own shape, and a disc needs a square. Choose No disc to cap.".into());
+            }
+            if framing == Framing::Square && disc.is_some() {
+                return Err("Square keeps the file's own format, which has no room for a disc's transparent corners. Choose No disc to square.".into());
             }
             Ok(Recipe { canvas: canvas.get(), framing, disc })
         })
@@ -1253,6 +1336,11 @@ fn build_batch(
             }
             let Some(recipe) = resolve_recipe() else { return };
             let needle = e_match.text().to_string();
+            let left_why = if recipe.framing == Framing::Square {
+                "already square"
+            } else {
+                "already within the cap"
+            };
 
             while let Some(c) = results.first_child() {
                 results.remove(&c);
@@ -1393,7 +1481,7 @@ fn build_batch(
                                     "{verb} — {ok} {}{}{}",
                                     if dry { "would be written" } else { "written" },
                                     if left > 0 {
-                                        format!(" · {left} already within the cap, left alone")
+                                        format!(" · {left} {left_why}, left alone")
                                     } else {
                                         String::new()
                                     },
@@ -1584,21 +1672,50 @@ fn build_batch(
     let shown_sample: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let pending_sample: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let survey_now: Rc<RefCell<Option<(Survey, PathBuf)>>> = Rc::new(RefCell::new(None));
-    let is_published = {
+    let is_folder = {
         let dd_scope = dd_scope.clone();
-        move || dd_scope.selected() == 1
+        move || dd_scope.selected() == 0
+    };
+    // What a list run leaves out, for the survey line ("247 to square · …").
+    let list_left_out = {
+        let dd_scope = dd_scope.clone();
+        let dd_frame = dd_frame.clone();
+        let list = list.clone();
+        move || -> String {
+            if dd_scope.selected() != 1 {
+                return String::new();
+            }
+            match list.borrow().as_ref() {
+                Some((_, l)) => l.left_out(framing_at(dd_frame.selected()).job()),
+                None => String::new(),
+            }
+        }
     };
     let scope_key = {
         let dd_scope = dd_scope.clone();
+        let dd_frame = dd_frame.clone();
         let src = src.clone();
         let manifest = manifest.clone();
+        let list = list.clone();
         let e_match = e_match.clone();
         move || {
+            // Under a list the framing chooses the lines, so it is part of
+            // the scope; elsewhere a framing change must not re-walk.
+            let lines = if dd_scope.selected() == 1 {
+                format!(
+                    "{:?}|{:?}",
+                    list.borrow().as_ref().map(|(p, _)| p.clone()),
+                    framing_at(dd_frame.selected()).job()
+                )
+            } else {
+                String::new()
+            };
             format!(
-                "{}|{:?}|{}|{}",
+                "{}|{:?}|{}|{}|{}",
                 dd_scope.selected(),
                 src.borrow(),
                 manifest.borrow().is_some(),
+                lines,
                 e_match.text()
             )
         }
@@ -1645,7 +1762,8 @@ fn build_batch(
             std::thread::spawn(move || {
                 let _ = tx.send_blocking(survey_batch(&scope, &walk_needle, SAMPLE_N));
             });
-            let what = if is_published() { "release" } else { "folder" };
+            let what = if is_folder() { "folder" } else { "release" };
+            let left_out = list_left_out();
             glib::spawn_future_local(clone!(
                 #[strong]
                 survey_gen,
@@ -1665,6 +1783,12 @@ fn build_batch(
                         return; // the scope or filter moved on while we walked
                     }
                     show_survey(&s, what, &needle, &survey_lbl, &survey_list, &survey_exp);
+                    if !left_out.is_empty() {
+                        survey_lbl.set_text(&format!(
+                            "{} \u{b7} not in this run: {left_out}",
+                            survey_lbl.text()
+                        ));
+                    }
                     b_run.set_label(&format!(
                         "Run ({} file{})",
                         s.total,
@@ -1708,9 +1832,10 @@ fn build_batch(
                 return glib::ControlFlow::Continue;
             }
         };
-        let cap = recipe.framing == Framing::Cap;
+        let cap = recipe.framing.keeps_file();
+        let square = recipe.framing == Framing::Square;
         if !cap {
-            // Back from Cap: the button promises the whole set again.
+            // Back from Cap or Square: the button promises the whole set again.
             b_run.set_label(&format!("Run ({total} file{})", if total == 1 { "" } else { "s" }));
         }
         if first.is_empty() {
@@ -1725,7 +1850,7 @@ fn build_batch(
             // Under Cap the useful sample is the files it would CHANGE, and
             // the useful count is how many: read from headers, all of them.
             let (over, pick) = if cap {
-                let (over, pick) = cap_survey(&files, recipe.canvas, SAMPLE_N);
+                let (over, pick) = change_survey(&files, recipe, SAMPLE_N);
                 (Some(over), pick)
             } else {
                 (None, first)
@@ -1775,6 +1900,19 @@ fn build_batch(
                 } else {
                     String::new()
                 };
+                if let (Some(over), true) = (over, square) {
+                    b_run.set_label(&format!("Run ({over} of {total} to square)"));
+                    samples_note.set_text(&if over == 0 {
+                        format!("All {total} are already square. Square would write nothing.")
+                    } else {
+                        format!(
+                            "{over} of {total} are not square and would be cropped to their centre, then held to {} px; the other {} are left alone. Shown: the first {n} that change{fails}.",
+                            recipe.canvas,
+                            total - over
+                        )
+                    });
+                    return;
+                }
                 if let Some(over) = over {
                     b_run.set_label(&format!("Run ({over} of {total} to shrink)"));
                     samples_note.set_text(&if over == 0 {
@@ -1797,6 +1935,26 @@ fn build_batch(
     });
 
     exp
+}
+
+/// The framing dropdown's entries, in order.
+fn framing_at(i: u32) -> Framing {
+    match i {
+        1 => Framing::Fit,
+        2 => Framing::Cap,
+        3 => Framing::Square,
+        _ => Framing::Cover,
+    }
+}
+
+/// The source row's readout for a loaded list: its name and what it holds.
+fn list_readout(p: &Path, l: &CoverList) -> String {
+    let name = p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut t = format!("{name} \u{b7} {} lines \u{b7} {}", l.lines.len(), l.root.display());
+    if !l.skipped.is_empty() {
+        t += &format!(" \u{b7} {} unreadable", l.skipped.len());
+    }
+    t
 }
 
 /// Fill the survey readout: a headline, and a list of what each release or
