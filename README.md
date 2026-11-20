@@ -15,7 +15,10 @@ X11 screen picker and grew into a small artwork tool. Part of the `n.*` suite.
 - Pick any colour on screen (the desktop's own picker on Wayland, the bundled
   `xcolor` CLI on X11) — HEX / RGB / HSL,
   copied to the clipboard.
-- Recent colours collect into a compact **History palette**.
+- Recent colours collect into a compact **History palette**, with a fixed
+  **Basics** strip (white, greys, black, primaries and secondaries) after it.
+- **Type a colour** into the HEX / RGB / HSL field (`#fff`, `rgb(…)`,
+  `hsl(…)`, `white`) and press Enter.
 - **Palettes:** import `.gpl` / `.json`, export to GPL / CSS / JSON, named
   swatches, pin up to three beside the editor, plus a dedicated Palettes view.
 

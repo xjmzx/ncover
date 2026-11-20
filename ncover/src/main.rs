@@ -242,7 +242,8 @@ struct State {
     data: AppData,
     current: Option<Rgb>,
     swatch: DrawingArea,
-    code_label: Label,
+    /// The current colour's text, editable: type a colour and press Enter.
+    code_label: gtk::Entry,
     fmt_hex: ToggleButton,
     fmt_rgb: ToggleButton,
     fmt_hsl: ToggleButton,
@@ -266,9 +267,10 @@ fn refresh_swatch(state: &State) {
 fn refresh_code(state: &State) {
     let txt = match state.current {
         Some(c) => c.format(state.data.format),
-        None => "(no color picked)".to_string(),
+        None => String::new(),
     };
     state.code_label.set_text(&txt);
+    state.code_label.remove_css_class("error");
 }
 
 fn refresh_format_toggles(state: &State) {
@@ -383,6 +385,13 @@ fn refresh_pinned_ui(state: &State, window: &ApplicationWindow, shared: &SharedS
         strip.append(&build_swatch_flow(&hist, state.data.format, window, shared));
         state.pinned_box.append(&strip);
     }
+
+    // Basics: white, black, greys, the primaries and secondaries. Built in
+    // and fixed, so white is always one click away.
+    let basics: Vec<Rgb> = BASICS.iter().filter_map(|h| Rgb::from_hex(h)).collect();
+    state
+        .pinned_box
+        .append(&build_compact_strip("Basics", &basics, state.data.format, window, shared));
 
     let mut shown = 0;
     for name in &state.data.pinned {
@@ -5039,11 +5048,15 @@ fn build_ui(app: &Application) {
     fmt_row.append(&fmt_hsl);
     code_col.append(&fmt_row);
 
-    let code_label = Label::new(Some("(no color picked)"));
-    code_label.set_selectable(true);
-    code_label.set_xalign(0.0);
+    // The colour's text is also where a colour is typed: #FFFFFF, #fff,
+    // rgb(255, 255, 255), 255 255 255, hsl(0, 0%, 100%) or a basic name, then
+    // Enter. It becomes the current colour and joins History, as a pick does.
+    let code_label = gtk::Entry::new();
+    code_label.set_placeholder_text(Some("#FFFFFF, rgb(…), hsl(…) or white"));
     code_label.add_css_class("code-display");
-    code_label.set_wrap(true);
+    code_label.set_tooltip_text(Some(
+        "Type a colour and press Enter: #FFFFFF, #fff, rgb(255, 255, 255), 255 255 255, hsl(0, 0%, 100%), or white, black, red…",
+    ));
     code_col.append(&code_label);
 
     let copy_btn = Button::with_label("Copy");
@@ -5367,6 +5380,32 @@ fn build_ui(app: &Application) {
         refresh_code(&s);
         refresh_history_ui(&s, &window, &shared);
         refresh_palettes_all(&s, &window, &shared);
+    }
+
+    // typed colour: Enter sets it, as a pick would
+    {
+        let shared = shared.clone();
+        let window_ref = window.clone();
+        code_label.connect_activate(move |e| {
+            let Some(c) = parse_color(&e.text()) else {
+                e.add_css_class("error");
+                return;
+            };
+            {
+                let mut s = shared.borrow_mut();
+                s.current = Some(c);
+                s.data.history.retain(|x| *x != c);
+                s.data.history.insert(0, c);
+                s.data.history.truncate(HISTORY_LIMIT);
+                let _ = save_data(&s.data);
+            }
+            let s = shared.borrow();
+            refresh_swatch(&s);
+            refresh_code(&s);
+            refresh_history_ui(&s, &window_ref, &shared);
+        });
+        // A half-typed colour turns red on Enter; typing again clears it.
+        code_label.connect_changed(|e| e.remove_css_class("error"));
     }
 
     // pick

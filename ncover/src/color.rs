@@ -45,6 +45,100 @@ impl Rgb {
     }
 }
 
+/// A colour typed by hand, in any of the forms the app shows or a person
+/// would write: `#FFFFFF`, `#fff`, `ffffff`, `rgb(255, 255, 255)`,
+/// `255, 255, 255`, `255 255 255`, `hsl(0, 0%, 100%)`, or a basic name
+/// (`white`, `black`, `red`, …). None for anything else.
+pub(crate) fn parse_color(input: &str) -> Option<Rgb> {
+    let s = input.trim().to_lowercase();
+    if s.is_empty() {
+        return None;
+    }
+    if let Some(c) = named_color(&s) {
+        return Some(c);
+    }
+    let hex = s.trim_start_matches('#');
+    if hex.len() == 3 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        let d: Vec<u8> = hex.chars().map(|c| c.to_digit(16).unwrap() as u8 * 17).collect();
+        return Some(Rgb { r: d[0], g: d[1], b: d[2] });
+    }
+    if hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Rgb::from_hex(hex);
+    }
+    let (body, is_hsl) = if let Some(b) = s.strip_prefix("hsl(").and_then(|b| b.strip_suffix(')')) {
+        (b, true)
+    } else if let Some(b) = s.strip_prefix("rgb(").and_then(|b| b.strip_suffix(')')) {
+        (b, false)
+    } else {
+        (s.as_str(), false)
+    };
+    let nums: Vec<f32> = body
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.trim_end_matches('%').parse::<f32>())
+        .collect::<Result<_, _>>()
+        .ok()?;
+    if nums.len() != 3 {
+        return None;
+    }
+    if is_hsl {
+        let (h, sat, l) = (nums[0], nums[1], nums[2]);
+        if !(0.0..=100.0).contains(&sat) || !(0.0..=100.0).contains(&l) {
+            return None;
+        }
+        let (r, g, b) = hsl_to_rgb(h.rem_euclid(360.0), sat / 100.0, l / 100.0);
+        return Some(Rgb { r, g, b });
+    }
+    if nums.iter().any(|n| !(0.0..=255.0).contains(n) || n.fract() != 0.0) {
+        return None;
+    }
+    Some(Rgb { r: nums[0] as u8, g: nums[1] as u8, b: nums[2] as u8 })
+}
+
+/// The names worth typing: the Basics strip's colours and a few more.
+fn named_color(s: &str) -> Option<Rgb> {
+    let hex = match s {
+        "white" => "FFFFFF",
+        "black" => "000000",
+        "grey" | "gray" => "808080",
+        "silver" | "light grey" | "light gray" | "lightgrey" | "lightgray" => "C0C0C0",
+        "dark grey" | "dark gray" | "darkgrey" | "darkgray" => "404040",
+        "red" => "FF0000",
+        "green" | "lime" => "00FF00",
+        "blue" => "0000FF",
+        "yellow" => "FFFF00",
+        "cyan" | "aqua" => "00FFFF",
+        "magenta" | "fuchsia" => "FF00FF",
+        "orange" => "FF8000",
+        _ => return None,
+    };
+    Rgb::from_hex(hex)
+}
+
+/// The Basics strip: white, black and three greys, then the RGB primaries and
+/// secondaries. Built in and fixed: not a palette, never exported.
+pub(crate) const BASICS: [&str; 11] = [
+    "FFFFFF", "C0C0C0", "808080", "404040", "000000", "FF0000", "00FF00", "0000FF", "FFFF00", "00FFFF",
+    "FF00FF",
+];
+
+pub(crate) fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = h / 60.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r1, g1, b1) = match hp as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    let to = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    (to(r1), to(g1), to(b1))
+}
+
 pub(crate) fn rgb_to_hsl(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
     let r = r as f32 / 255.0;
     let g = g as f32 / 255.0;
@@ -111,4 +205,51 @@ impl Swatch {
 pub(crate) struct Palette {
     pub(crate) name: String,
     pub(crate) colors: Vec<Swatch>,
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+
+    fn c(r: u8, g: u8, b: u8) -> Option<Rgb> {
+        Some(Rgb { r, g, b })
+    }
+
+    #[test]
+    fn every_form_the_app_shows_or_a_person_types() {
+        for s in ["#FFFFFF", "#fff", "ffffff", "FFF", " #FfFfFf ", "white", "WHITE", "rgb(255, 255, 255)",
+            "255, 255, 255", "255 255 255", "hsl(0, 0%, 100%)", "hsl(0 0% 100%)"]
+        {
+            assert_eq!(parse_color(s), c(255, 255, 255), "{s}");
+        }
+        assert_eq!(parse_color("#1a2B3c"), c(0x1a, 0x2b, 0x3c));
+        assert_eq!(parse_color("hsl(120, 100%, 50%)"), c(0, 255, 0));
+        assert_eq!(parse_color("hsl(240, 100%, 25%)"), c(0, 0, 128));
+    }
+
+    #[test]
+    fn the_app_s_own_text_reads_back_as_the_same_colour() {
+        for rgb in [Rgb { r: 12, g: 200, b: 99 }, Rgb { r: 255, g: 128, b: 0 }, Rgb { r: 0, g: 0, b: 0 }] {
+            assert_eq!(parse_color(&rgb.hex()), Some(rgb));
+            assert_eq!(parse_color(&rgb.rgb()), Some(rgb));
+            // HSL text is rounded to whole degrees and percents: within one step.
+            let back = parse_color(&rgb.hsl()).unwrap();
+            for (a, b) in [(rgb.r, back.r), (rgb.g, back.g), (rgb.b, back.b)] {
+                assert!((a as i16 - b as i16).abs() <= 3, "{rgb:?} -> {} -> {back:?}", rgb.hsl());
+            }
+        }
+    }
+
+    #[test]
+    fn nonsense_is_not_a_colour() {
+        for s in ["", "#ffff", "#gggggg", "rgb(256, 0, 0)", "1, 2", "1.5, 2, 3", "hsl(0, 120%, 50%)", "teal-ish"] {
+            assert_eq!(parse_color(s), None, "{s}");
+        }
+    }
+
+    #[test]
+    fn the_basics_are_colours() {
+        assert!(BASICS.iter().all(|h| Rgb::from_hex(h).is_some()));
+        assert_eq!(Rgb::from_hex(BASICS[0]), parse_color("white"));
+    }
 }

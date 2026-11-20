@@ -11,6 +11,17 @@ to diverge. Its version numbers are independent of these.
 
 ## [Unreleased]
 
+### Added
+- **Type a colour.** The HEX / RGB / HSL readout under the swatch is now a
+  field: type `#FFFFFF`, `#fff`, `rgb(255, 255, 255)`, `255 255 255`,
+  `hsl(0, 0%, 100%)` or a basic name (white, black, grey, red, green,
+  blue, yellow, cyan, magenta, orange) and press Enter. It becomes the
+  current colour and joins History, as a pick does; anything else turns
+  the field red. The app's own HEX and RGB text reads back exactly.
+- **Basics**, a built-in strip after History: white, three greys, black,
+  and the RGB primaries and secondaries. Always there, one click each, and
+  never exported with your palettes. White for a label's background, say.
+
 ## [0.5.0] — 2026-11-20
 
 ### Added
