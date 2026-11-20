@@ -194,17 +194,21 @@ pub(crate) fn load_manifest(path: &Path) -> Result<Manifest> {
 /// the name filter. A file the list names but the disk does not have is an
 /// error for its root, so the survey counts it as unreadable rather than
 /// quietly as "matched nothing".
-fn named_image(file: &Path, needle: &str, into: &mut Vec<PathBuf>) -> Result<()> {
+/// A file a list names: taken if it is there and an image. The name filter
+/// does NOT apply: the filter narrows a walk of a folder, and a named file
+/// has already been chosen by the list. (Release covers are all `cover.*`,
+/// so the default "cover" filter hid this until label art, where a list
+/// names `tectonic.label.jpg` and the filter dropped every line.)
+fn named_image(file: &Path, into: &mut Vec<PathBuf>) -> Result<()> {
     if !file.is_file() {
         anyhow::bail!("the list names {}, which is not there", file.display());
     }
-    let name = file.file_name().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
     let ext_ok = file
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_lowercase())
         .is_some_and(|e| IMAGE_EXTS.contains(&e.as_str()));
-    if ext_ok && (needle.is_empty() || name.contains(&needle.to_lowercase())) {
+    if ext_ok {
         into.push(file.to_path_buf());
     }
     Ok(())
@@ -562,7 +566,7 @@ pub(crate) fn walk_scope(scope: &Scope, needle: &str) -> (Vec<(usize, PathBuf)>,
         if let Some(files) = scope.only.get(root) {
             // One error per missing file, each naming it, all under this root.
             for file in files {
-                if let Err(e) = named_image(file, needle, &mut found) {
+                if let Err(e) = named_image(file, &mut found) {
                     errors.push((root.clone(), format!("{e:#}")));
                 }
             }
@@ -2312,13 +2316,14 @@ relative/folder\t-\t-
         assert_eq!(scope.roots, [logos.clone()], "one folder is one root");
         assert!(scope.names.is_empty(), "a shared folder carries no one line's name");
 
-        let s = survey_batch(&scope, "");
+        // The default name filter is "cover"; a named file ignores it.
+        let s = survey_batch(&scope, "cover");
         let mut got: Vec<_> = s.files.iter().map(|f| f.file_name().unwrap().to_string_lossy().into_owned()).collect();
         got.sort();
         assert_eq!(got, ["Mute.label.jpg", "Ultra.Records.label.jpg", "Warp.label.png"], "every named file, and only those");
         assert_eq!(s.unreadable, 1, "the missing one is counted, by itself");
         assert_eq!(s.empty_roots, 0);
-        assert_eq!(s.total, find_in_scope(&scope, "").0.len(), "the count is the run");
+        assert_eq!(s.total, find_in_scope(&scope, "cover").0.len(), "the count is the run");
         for (f, n) in s.files.iter().zip(&s.names) {
             let want = match f.file_name().unwrap().to_str().unwrap() {
                 "Ultra.Records.label.jpg" => "Ultra Records",

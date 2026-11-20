@@ -30,20 +30,36 @@ file beside its published image in its Review overlay. It does **not yet
 export label lines**: that is ndisc's stage 3c, and until it lands there is
 nothing for ncover to read.
 
+**Decided 2026-11-20 (by the user): labels stay list lines.** No Labels
+section and no Covers / Labels filter in Batch. ndisc decides which labels
+need work (it knows what is published) and exports them as their own list;
+ncover acts on plain files. Covers and labels never meet in one run because
+they are two exports. Considered and set aside: a Covers / Labels filter
+(nothing to separate while the exports are separate) and a Labels section
+pointed at the label art folder (Batch's folder scope already does that,
+without knowing what needs work).
+
+Optional polish, not agreed, if the list lines ever feel anonymous: name
+a one-folder list in the readout ("Label list · tjmzx-labels"); suggest
+Pad over Square for logos (a centre crop can cut a logo's type); say "for 5
+labels" rather than "in 1 folder".
+
 **ncover's side is built, not released.** Label art reaches ncover only as
-list lines (no label scope, by decision): one line per label, all pointing
+list lines: one line per label, all pointing
 into one folder of logos. `3ccf23d` lets a list name several files in one
 folder (it took only the last before). With the library write-back
 (`cd4a8a8`) and the Mac-parity Batch changes (`6a7fb21`), that is everything
 since v0.4.0, all unreleased.
 
+**ndisc 3c is built** (2026-11-20, after 0.8.0): Review → Labels → Local
+files → Export list writes one line per flagged label file, in the cover
+list's format. The real export (76 lines) loads here with nothing skipped;
+Square takes 5 logos and Cap 14 once named files ignore the name filter
+(fixed the same day; the default "cover" filter dropped every label file).
+
 **Still to do, in order:**
 
-1. **ndisc 3c**: label lines in the Export list (folder = the label art
-   folder, cover file = the label's matched file, name = the label, the
-   actions column as for covers: `ncover:square`, `ncover:cap`, or
-   `ndisc:upload` for the 43 masters whose label publishes someone else's
-   image).
+1. ~~ndisc 3c~~ (built; needs an ndisc release to reach the installed app).
 2. **Release ncover 0.5.0** with the write-back and the list fix, so the
    installed app can take that export.
 3. **First real run**: ndisc's label export → ncover From a list… →

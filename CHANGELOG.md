@@ -49,6 +49,13 @@ to diverge. Its version numbers are independent of these.
   keeps its release's name. The rule the macOS sibling already follows.
 
 ### Fixed
+- **The name filter dropped every file a list names that does not contain
+  "cover".** The filter (default "cover") narrows a walk of a folder, and
+  it was applied to a list's named files too. Release covers are all
+  `cover.*`, which hid it; ndisc's label list names files like
+  `tectonic.label.jpg`, and every line was dropped. A named file is now
+  taken whatever the filter says. Checked on ndisc 0.8.0's real label
+  export: Square takes 5 logos and Cap 14, and the dry run agrees.
 - **A list naming several files in one folder took only the last.** The
   list scope kept one named file per folder, so a folder of label logos
   with a line per label ran over one logo. Every file a line names is
