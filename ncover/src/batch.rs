@@ -118,6 +118,11 @@ pub(crate) fn guard_batch(src: &Path, out: &Path) -> Result<()> {
 /// Walk `root` for images whose filename contains `needle` (case-insensitively;
 /// empty matches everything). Hidden directories are skipped — nothing in a
 /// `.git` is artwork.
+/// ndisc's label art folder under the library root, reserved suite-wide
+/// (SUITE.md): record-label images, not releases. A walk skips it by name
+/// unless it is the folder being walked (the Labels scope).
+pub(crate) const LABELS_DIR: &str = "_labels";
+
 pub(crate) fn find_images(root: &Path, needle: &str, into: &mut Vec<PathBuf>) -> Result<()> {
     let needle = needle.to_lowercase();
     let rd = fs::read_dir(root).with_context(|| format!("cannot read {}", root.display()))?;
@@ -131,6 +136,9 @@ pub(crate) fn find_images(root: &Path, needle: &str, into: &mut Vec<PathBuf>) ->
             continue;
         }
         if path.is_dir() {
+            if name == LABELS_DIR {
+                continue; // label art, not covers: the Labels scope's own
+            }
             // A folder we cannot read is not fatal to the whole run.
             let _ = find_images(&path, &needle, into);
             continue;
@@ -1472,6 +1480,21 @@ mod batch_tests {
             "Autechre \u{2014} Amber",
             "a disc subfolder keeps the release's name"
         );
+    }
+
+    #[test]
+    fn a_walk_skips_labels_unless_it_is_the_folder_walked() {
+        let lib = tmpdir("labels-skip");
+        fs::create_dir_all(lib.join("A/One")).unwrap();
+        fs::create_dir_all(lib.join(LABELS_DIR)).unwrap();
+        fs::write(lib.join("A/One/cover.jpg"), b"x").unwrap();
+        fs::write(lib.join(LABELS_DIR).join("Warp.jpg"), b"x").unwrap();
+        let mut got = Vec::new();
+        find_images(&lib, "", &mut got).unwrap();
+        assert_eq!(got, [lib.join("A/One/cover.jpg")], "the library walk leaves _labels alone");
+        let mut labels = Vec::new();
+        find_images(&lib.join(LABELS_DIR), "", &mut labels).unwrap();
+        assert_eq!(labels, [lib.join(LABELS_DIR).join("Warp.jpg")]);
     }
 
     #[test]

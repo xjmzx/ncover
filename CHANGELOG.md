@@ -12,6 +12,18 @@ to diverge. Its version numbers are independent of these.
 ## [Unreleased]
 
 ### Added
+- **A Label art scope**, a fourth button (a tag) beside folder · list ·
+  disc: ndisc's `_labels` folder under the library root, read from
+  published.json, one image per record label. The name filter steps aside
+  there (label files are not `cover.*`) and comes back when you leave.
+  Until ndisc has created `_labels` the scope says so and Run stays off.
+  Every other walk now skips a folder named `_labels`, reserved for label
+  art suite-wide (SUITE.md), so a library-wide Folder run never takes the
+  logos for covers.
+
+### Changed
+- **New app icon**, from the 2026-11-20 master.
+
 - **Batch can write into the library, keeping the originals.** A second
   Output, *Into the library*, beside *To a folder*, for Cap, Square and
   Pad: each cover is replaced where it is, in its own name and format, so

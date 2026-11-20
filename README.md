@@ -36,6 +36,8 @@ X11 screen picker and grew into a small artwork tool. Part of the `n.*` suite.
   grid of every file it would touch and a dry run. It writes to an output
   folder, or (Cap, Square, Pad) back into the library in place, keeping each
   original in an originals folder with a log and a **Put back last run**.
+  A fourth scope, **Label art**, takes ndisc's `_labels` folder of
+  record-label images.
   Framings: **Cover** and **Fit** write a square PNG (with an
   optional disc); **Cap** shrinks oversized images, **Square** crops
   off-square ones to their centre, and **Pad** fills them out to a square;

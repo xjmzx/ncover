@@ -30,6 +30,10 @@ file beside its published image in its Review overlay. It does **not yet
 export label lines**: that is ndisc's stage 3c, and until it lands there is
 nothing for ncover to read.
 
+**Added the same day (by the user): a Label art scope** — a fourth Scope
+button over `<library root>/_labels`, for running a recipe over every label
+image at once. Lists stay the way to act on the flagged few.
+
 **Decided 2026-11-20 (by the user): labels stay list lines.** No Labels
 section and no Covers / Labels filter in Batch. ndisc decides which labels
 need work (it knows what is published) and exports them as their own list;

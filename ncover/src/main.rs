@@ -944,10 +944,11 @@ fn build_batch(
     // --- scope: a folder, a cover list, or ndisc's published discography ---
     // The published option is only offered when ndisc has actually exported a
     // manifest. A scope that can only ever match nothing is worse than no scope.
-    // Indices: 0 folder, 1 list, 2 published.
+    // Indices: 0 folder, 1 list, 2 published, 3 labels. Labels is the
+    // library's `_labels` folder, so it needs the manifest's library root.
     let has_manifest = published_manifest_path().is_some();
     let scope_names: &[&str] = if has_manifest {
-        &["Folder", "From a list\u{2026}", "Published discography"]
+        &["Folder", "From a list\u{2026}", "Published discography", "Label art"]
     } else {
         &["Folder", "From a list\u{2026}"]
     };
@@ -968,11 +969,19 @@ fn build_batch(
         ("folder-symbolic", "Folder: any tree of artwork, searched recursively."),
         ("view-list-bullet-symbolic", "From a list: a text file with one release folder per line, such as ndisc's Export list from Local covers vs Blossom. Where a line names its cover file, only that file is taken. Where it names actions, Cap and Square take only the lines marked ncover:cap or ncover:square, and the rest are counted."),
         ("media-optical-cd-audio-symbolic", "Published discography: the exact releases ndisc has published to Nostr, read from the suite's published.json. Its covers, mirrored to your output folder."),
+        ("tag-symbolic", "Label art: ndisc's _labels folder under the library root (from published.json), one image per record label. The name filter does not apply here."),
     ];
     let mut scope_btns: Vec<ToggleButton> = Vec::new();
     for (i, (icon, tip)) in scope_tips.iter().enumerate().take(scope_names.len()) {
         let b = ToggleButton::new();
-        b.set_icon_name(icon);
+        // A themed icon with a fallback: tag-symbolic is Yaru's, not
+        // Adwaita's, so another theme still shows a bookmark.
+        let names: &[&str] = if *icon == "tag-symbolic" {
+            &["tag-symbolic", "user-bookmarks-symbolic"]
+        } else {
+            std::slice::from_ref(icon)
+        };
+        b.set_child(Some(&gtk::Image::from_gicon(&gio::ThemedIcon::from_names(names))));
         b.set_tooltip_text(Some(tip));
         b.set_size_request(48, -1);
         if let Some(first) = scope_btns.first() {
@@ -1596,6 +1605,8 @@ fn build_batch(
             b_src,
             #[weak]
             l_src,
+            #[weak]
+            e_match,
             move |dd| {
                 *src.borrow_mut() = None;
                 if dd.selected() == 1 {
@@ -1614,17 +1625,36 @@ fn build_batch(
                 }
                 b_src.set_label("Source\u{2026}");
                 b_src.set_tooltip_text(Some("A folder of artwork. Searched recursively."));
-                if dd.selected() == 2 {
+                // Label files are not called cover.*: the Labels scope takes
+                // every image in _labels, so the "cover" filter steps aside
+                // there and comes back when you leave.
+                if dd.selected() == 3 {
+                    if e_match.text() == "cover" {
+                        e_match.set_text("");
+                    }
+                } else if e_match.text().is_empty() {
+                    e_match.set_text("cover");
+                }
+                if dd.selected() == 2 || dd.selected() == 3 {
                     let loaded = published_manifest_path()
                         .ok_or_else(|| anyhow::anyhow!("published.json is gone"))
                         .and_then(|p| load_manifest(&p));
                     match loaded {
                         Ok(m) => {
-                            l_src.set_text(&format!(
-                                "{} releases · {}",
-                                m.releases.len(),
-                                m.library_root.display()
-                            ));
+                            if dd.selected() == 3 {
+                                let dir = m.library_root.join(LABELS_DIR);
+                                l_src.set_text(&if dir.is_dir() {
+                                    dir.display().to_string()
+                                } else {
+                                    format!("no {LABELS_DIR} folder yet under {}", m.library_root.display())
+                                });
+                            } else {
+                                l_src.set_text(&format!(
+                                    "{} releases · {}",
+                                    m.releases.len(),
+                                    m.library_root.display()
+                                ));
+                            }
                             b_src.set_sensitive(false);
                             *manifest.borrow_mut() = Some(m);
                         }
@@ -1705,6 +1735,22 @@ fn build_batch(
                 return match list.borrow().as_ref() {
                     Some((_, l)) => Ok(Scope::list(l, framing_at(dd_frame.selected()).job())),
                     None => Err("Choose a cover list.".into()),
+                };
+            }
+            if dd_scope.selected() == 3 {
+                return match manifest.borrow().as_ref() {
+                    Some(m) => {
+                        let dir = m.library_root.join(LABELS_DIR);
+                        if dir.is_dir() {
+                            Ok(Scope::folder(dir))
+                        } else {
+                            Err(format!(
+                                "No {LABELS_DIR} folder under {} yet. ndisc keeps the label art there once it has filled it.",
+                                m.library_root.display()
+                            ))
+                        }
+                    }
+                    None => Err("The library root comes from ndisc's published.json, which could not be read.".into()),
                 };
             }
             if dd_scope.selected() == 2 {
