@@ -21,6 +21,41 @@ Built: all four steps. ndisc's export (0.7.6), and in ncover the list
 scope, Square, Pad, the review grid (0.4.0) and the library write-back
 (unreleased). Next: Convert, then the dimension filters.
 
+## Label art: the same loop, for label images (noted 2026-11-20)
+
+**Where it stands.** ndisc 0.8.0 (released 2026-11-20) keeps labels in its
+database, has a label art folder setting (the masters folder, matched to
+labels by name, with a hand pick per label) and checks each label's local
+file beside its published image in its Review overlay. It does **not yet
+export label lines**: that is ndisc's stage 3c, and until it lands there is
+nothing for ncover to read.
+
+**ncover's side is built, not released.** Label art reaches ncover only as
+list lines (no label scope, by decision): one line per label, all pointing
+into one folder of logos. `3ccf23d` lets a list name several files in one
+folder (it took only the last before). With the library write-back
+(`cd4a8a8`) and the Mac-parity Batch changes (`6a7fb21`), that is everything
+since v0.4.0, all unreleased.
+
+**Still to do, in order:**
+
+1. **ndisc 3c**: label lines in the Export list (folder = the label art
+   folder, cover file = the label's matched file, name = the label, the
+   actions column as for covers: `ncover:square`, `ncover:cap`, or
+   `ndisc:upload` for the 43 masters whose label publishes someone else's
+   image).
+2. **Release ncover 0.5.0** with the write-back and the list fix, so the
+   installed app can take that export.
+3. **First real run**: ndisc's label export → ncover From a list… →
+   Square / Pad (Pad was built partly for logos) → Into the library with
+   an originals folder → ndisc rechecks. Watch: the originals land under
+   `originals/<labels folder>/<file>`, and ndisc's match still finds each
+   file (names are kept, so it should).
+4. **ndisc 3d**: upload a label's local file and point the label at it,
+   then publish the labels manifest.
+5. **macOS**: Phase F7 (several files in one folder) before that app takes
+   a label list; F1 for the write-back.
+
 ## Dimension filters and the Files list
 
 **Built 2026-11-19:** the `From a list…` scope, reading ndisc's Export list
