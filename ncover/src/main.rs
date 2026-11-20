@@ -898,6 +898,16 @@ fn build_help(window: &ApplicationWindow, shared: &SharedState, to_edit: &Toggle
 }
 
 /// The batch section: a recipe, a folder, and a run you can watch and stop.
+/// A section heading in Batch's column, as the macOS sibling's titled form
+/// sections: the same four titles, so the two read alike.
+fn batch_heading(text: &str) -> Label {
+    let l = Label::new(Some(text));
+    l.add_css_class("heading");
+    l.set_xalign(0.0);
+    l.set_margin_top(6);
+    l
+}
+
 fn build_batch(
     window: &ApplicationWindow,
     shared: &SharedState,
@@ -990,6 +1000,7 @@ fn build_batch(
     });
     row_scope.append(&scope_row);
     row_scope.set_hexpand(true);
+    body.append(&batch_heading("What to run it over"));
     body.append(&row_scope);
 
     // --- folders ---
@@ -1027,6 +1038,7 @@ fn build_batch(
     out_row.append(&t_folder);
     out_row.append(&t_lib);
     row_out.append(&out_row);
+    body.append(&batch_heading("Where the results go"));
     body.append(&row_out);
 
     let row_dst = GBox::new(Orientation::Horizontal, 6);
@@ -1044,6 +1056,7 @@ fn build_batch(
     body.append(&row_dst);
 
     // --- recipe ---
+    body.append(&batch_heading("The recipe"));
     let row_r = GBox::new(Orientation::Horizontal, 6);
 
     let e_match = gtk::Entry::new();
@@ -1145,6 +1158,7 @@ fn build_batch(
     survey_lbl.add_css_class("dim-label");
     survey_lbl.set_xalign(0.0);
     survey_lbl.set_wrap(true);
+    body.append(&batch_heading("What it will touch"));
     body.append(&survey_lbl);
 
     // --- run ---
@@ -1166,6 +1180,15 @@ fn build_batch(
     l_prog.set_xalign(0.0);
     l_prog.set_wrap(true);
     body.append(&row_go);
+    // Why Run is greyed out, said in place rather than as a dialog when you
+    // press it: no output folder, an originals folder inside the library, a
+    // recipe that cannot work yet. Kept current by the ticker.
+    let l_why = Label::new(None);
+    l_why.add_css_class("warning");
+    l_why.set_xalign(0.0);
+    l_why.set_wrap(true);
+    l_why.set_visible(false);
+    body.append(&l_why);
 
     // --- the files: ONE list, two views ---
     // The grid on the right and the numbered list on the left are two views
@@ -2291,14 +2314,63 @@ fn build_batch(
             )
         }
     };
+    // Whether a run could start now, and if not, why: the checks Run makes,
+    // made ahead of time. A scope that is not chosen yet already says so in
+    // the survey line, so it greys the buttons without a second sentence.
+    let why_not = {
+        let into_lib = into_lib.clone();
+        let kept = kept.clone();
+        let dst = dst.clone();
+        let scope_now = scope_now.clone();
+        let recipe_now = recipe_now.clone();
+        move || -> Option<String> {
+            let scope = match scope_now() {
+                Ok(s) => s,
+                Err(_) => return Some(String::new()),
+            };
+            let lib = into_lib.get();
+            let root = if lib { kept.borrow().clone() } else { dst.borrow().clone() };
+            let Some(root) = root else {
+                return Some(
+                    if lib { "Choose the folder the originals are kept in." } else { "Choose an output folder." }.into(),
+                );
+            };
+            let guard = if lib {
+                guard_originals(&scope.guard_root, &root)
+            } else {
+                guard_batch(&scope.guard_root, &root)
+            };
+            if let Err(e) = guard {
+                return Some(e.to_string());
+            }
+            match recipe_now() {
+                Err(e) => Some(e),
+                Ok(r) if lib && !r.framing.keeps_file() => {
+                    Some("Only Cap, Square and Pad write into the library.".into())
+                }
+                Ok(_) => None,
+            }
+        }
+    };
+    let b_dry_t = b_dry.clone();
+    let b_stop_t = b_stop.clone();
     let page_w = page.downgrade();
     glib::timeout_add_local(std::time::Duration::from_millis(300), move || {
         let Some(page) = page_w.upgrade() else {
             return glib::ControlFlow::Break;
         };
-        // Another page showing: nobody is looking. A run in flight: it owns the CPU.
-        if !page.is_mapped() || !b_run.is_sensitive() {
+        // Another page showing: nobody is looking. A run in flight (Stop is
+        // live only then): it owns the CPU.
+        if !page.is_mapped() || b_stop_t.is_sensitive() {
             return glib::ControlFlow::Continue;
+        }
+        let why = why_not();
+        b_run.set_sensitive(why.is_none());
+        b_dry_t.set_sensitive(why.is_none());
+        let shown = why.unwrap_or_default();
+        l_why.set_visible(!shown.is_empty());
+        if l_why.text() != shown {
+            l_why.set_text(&shown);
         }
         // The picked colours change on the Picker page and fire nothing here.
         chip.set_visible(if dd_pad.is_visible() { dd_pad.selected() == 3 } else { dd_disc.selected() >= 3 });

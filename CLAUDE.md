@@ -125,7 +125,13 @@ porting further features across.
   that into a dialog.** The ticker uses the silent pair. Never let the
   ticker show a dialog: it runs every 300 ms.
 - The ticker does nothing while the Batch page is not on screen
-  (`is_mapped`) or a run is in flight.
+  (`is_mapped`) or a run is in flight, which it reads from **Stop** being
+  live: Run's own sensitivity is the ticker's output now (`why_not`, the
+  checks Run makes, made ahead of time and shown in `l_why`), so it cannot
+  also be the "running" flag.
+- **A file's name in the grid and Files list is `Scope::name_for_file`**:
+  the record for the nearest folder above it, else its folder under the
+  scope. The macOS `nameForFile`, ported; keep the two answering alike.
 - **Batch is a page of its own** (header switch Edit · Batch · Palettes · ⓘ Help, the Help page built by `build_help`; the `tips` setting now means "open on Help at launch"; the Edit page was "Picker" until 0.4.0, and the code still calls it `picker` / `view_pick`).
   It is still built inside `build_image_view`, because its size picker is
   bound to the canvas size, and handed out in `ImageView`. The right side is

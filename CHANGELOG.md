@@ -36,6 +36,18 @@ to diverge. Its version numbers are independent of these.
   This is step 3 of the cover review loop, done until now by a desktop
   script.
 
+### Changed
+- **Batch's column has the macOS sibling's four section titles**: What to
+  run it over, Where the results go, The recipe, What it will touch.
+- **Run says why it cannot go, in place.** Run and Dry run grey out, with
+  the reason under them ("Choose an output folder.", an originals folder
+  inside the library, a recipe that needs a colour), instead of a dialog
+  when you press them.
+- **Files are named by their own folder.** Under a folder scope every file
+  was captioned with the scope folder's name; it now reads its folder
+  under the scope ("Autechre/Amber"), and a cover in a disc subfolder
+  keeps its release's name. The rule the macOS sibling already follows.
+
 ### Fixed
 - **A Batch file outside the scope's folder could be written over itself.**
   A file found outside the folder the output mirrors (possible with a

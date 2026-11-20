@@ -277,3 +277,14 @@ export to be worth having.
   windows, so scripted checks run the app with `GDK_BACKEND=x11`.
 - **Docs.** Each phase adds its own "Traps" section to this repo's
   `CLAUDE.md`, in the same spirit as the Mac file, and a CHANGELOG entry.
+
+## The other direction, after 0.4.0
+
+What travels from here to the Mac now lives in that repo's
+[`docs/gtk-parity-plan.md`](https://github.com/macos-node/ncover/blob/main/docs/gtk-parity-plan.md),
+**Phase F** (recorded 2026-11-20): the library write-back with its exact log
+format, Dry run as a button, Files / Last run, and the outside-the-root
+refusal. The same section lists what this app took from the Mac that day
+(the four Batch section titles, the in-place reason Run cannot go,
+`nameForFile`). Both apps keep their own layout; that was agreed, and the
+table there records how they differ.

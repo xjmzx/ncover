@@ -456,6 +456,29 @@ impl Scope {
         s
     }
 
+    /// What to call one file in the grid and the Files list: the name on
+    /// record for the nearest folder above it (so a cover in `Disc 2` is
+    /// still "Artist — Title"), else its folder under the scope, so a folder
+    /// scope's two Ambers read `Autechre/Amber` and `Boards of Canada/Amber`
+    /// rather than both the scope's own name. The macOS sibling's
+    /// `nameForFile`, ported.
+    pub(crate) fn name_for_file(&self, file: &Path) -> String {
+        let mut dir = file.parent();
+        while let Some(d) = dir {
+            if let Some(n) = self.names.get(d) {
+                return n.clone();
+            }
+            if d == self.strip {
+                break;
+            }
+            dir = d.parent();
+        }
+        match file.parent().and_then(|d| d.strip_prefix(&self.strip).ok()) {
+            Some(rel) if !rel.as_os_str().is_empty() => rel.display().to_string(),
+            _ => self.name_of(&self.strip),
+        }
+    }
+
     /// What to call a walk root in the survey: the manifest's name, else its
     /// path under the strip prefix, else (a folder scope, root == strip) its
     /// own folder name.
@@ -585,7 +608,7 @@ pub(crate) fn survey_batch(scope: &Scope, needle: &str) -> Survey {
         empty_roots,
         unreadable,
         shared_names: shared_names(&rels),
-        names: all.iter().map(|(_, i)| scope.name_of(&scope.roots[*i])).collect(),
+        names: all.iter().map(|(f, _)| scope.name_for_file(f)).collect(),
         files: all.into_iter().map(|(f, _)| f.clone()).collect(),
     }
 }
@@ -1384,6 +1407,22 @@ mod batch_tests {
         let src = out.join("art");
         fs::create_dir_all(&src).unwrap();
         assert!(guard_batch(&src, &out).is_err());
+    }
+
+    #[test]
+    fn a_file_is_named_by_its_record_else_by_its_folder_under_the_scope() {
+        let lib = PathBuf::from("/lib");
+        let plain = Scope::folder(lib.clone());
+        assert_eq!(plain.name_for_file(Path::new("/lib/Autechre/Amber/cover.jpg")), "Autechre/Amber");
+        assert_eq!(plain.name_for_file(Path::new("/lib/Boards of Canada/Amber/cover.jpg")), "Boards of Canada/Amber");
+        assert_eq!(plain.name_for_file(Path::new("/lib/cover.jpg")), "lib", "a file at the root: the folder's own name");
+        let mut named = Scope::folder(lib.clone());
+        named.names.insert(lib.join("Autechre/Amber"), "Autechre \u{2014} Amber".into());
+        assert_eq!(
+            named.name_for_file(Path::new("/lib/Autechre/Amber/Disc 2/cover.jpg")),
+            "Autechre \u{2014} Amber",
+            "a disc subfolder keeps the release's name"
+        );
     }
 
     #[test]
