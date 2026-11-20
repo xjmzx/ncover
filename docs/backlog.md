@@ -17,8 +17,9 @@ never a database.
 3. **ncover**: write the results into the library, keeping the originals.
 4. **ndisc**: scan library, check again, upload, publish.
 
-Built so far: ndisc's export, the list scope, Square. Next: the library
-write-back, then Convert.
+Built: all four steps. ndisc's export (0.7.6), and in ncover the list
+scope, Square, Pad, the review grid (0.4.0) and the library write-back
+(unreleased). Next: Convert, then the dimension filters.
 
 ## Dimension filters and the Files list
 
@@ -35,23 +36,6 @@ survey counts the lines left out. Still to build:
   non-square by more than X%, long side over N px, long side under N px.
   They join the walk's selection, not a separate pass, so the survey line,
   the Files list, the samples and the Run count all agree with them.
-- **Files list rows** show each image's dimensions and gain an **Open
-  folder** action, for replacing a cover by hand.
-
-## Write results into the library, keeping originals
-
-**Why.** On 2026-11-13 the Cap runs went to an output folder and a desktop
-script (`swap-covers.py`) moved each original aside and the new file into
-place, logging every swap. That step belongs in ncover, so the loop runs
-inside the two apps.
-
-**What.** A run option that, after a successful run, swaps each output into the
-source library. Each original moves to a chosen originals folder under the
-same relative path. Every swap is logged (source, original kept, written),
-and an Undo restores from the log. It refuses to touch a file whose original
-slot is already taken. Batch's rule that it "never writes over its source"
-then becomes "never without keeping the original", and the CLAUDE.md
-write-path notes must say so.
 
 ## Square: what is left (planned 2026-11-13)
 
@@ -75,20 +59,18 @@ chooses "a select few". Still to build:
 - **A draggable square crop in the editor** for a single image, saved in
   the original format. A centre crop is wrong for some covers. For example,
   a CD insert with the hinge strip down one side needs the crop taken from
-  the other side. Today the editor always saves PNG (the disc mask needs
-  alpha), so saving JPEG from the editor is its own change.
+  the other side. Overwrite already writes a JPEG back as JPEG, so the
+  crop only needs the editor's side.
 
 **Open.**
 
 - Whether `Square` should refuse an image beyond some limit (say 25% off),
   where a centre crop would remove a large part of the art, or only warn in
   the dry run.
-- Whether the macOS sibling gets the same feature. It would be a port of the
-  idea and its tests, as with the rest of the parity plan, not shared code.
 
-**Workflow it slots into.** Output to a separate folder, dry run, run, then
-swap into the library keeping the originals. That is the same flow as the Cap
-runs of 2026-11-13 (`swap-covers.py`, originals kept beside it). In ndisc,
+**Workflow it slots into.** Dry run, then run *Into the library*, which
+keeps the originals (the Cap runs of 2026-11-13 did the same by hand with
+`swap-covers.py`). In ndisc,
 "Local covers vs Blossom" then offers the squared covers for upload. They are
 changed since publishing but not a larger copy of the same shape, so they
 will not be pre-ticked and need ticking by hand.

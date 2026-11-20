@@ -624,6 +624,20 @@ fn drop_alpha(pb: &gdk_pixbuf::Pixbuf) -> Result<gdk_pixbuf::Pixbuf> {
     Ok(out)
 }
 
+/// JPEG has no alpha: a result with transparent pixels is refused for a
+/// `.jpg` rather than flattened onto a colour nobody chose. Shared by
+/// Overwrite and the library write-back, so a dry run refuses what the real
+/// write would.
+pub(crate) fn refuse_alpha_for(pb: &gdk_pixbuf::Pixbuf, path: &Path) -> Result<()> {
+    if cap_format(path)?.0 == "jpeg" && has_transparency(pb) {
+        anyhow::bail!(
+            "the result has transparent areas and JPEG cannot hold them. Frame it with Cover, \
+             or use a White or Colour disc, or Save PNG instead"
+        );
+    }
+    Ok(())
+}
+
 /// Write `pb` over `path` in the file's own format (JPEG at quality 92, PNG
 /// as PNG). JPEG has no alpha, so a result with transparent pixels is refused
 /// with the reason rather than flattened onto a colour nobody chose. The
@@ -631,12 +645,7 @@ fn drop_alpha(pb: &gdk_pixbuf::Pixbuf) -> Result<gdk_pixbuf::Pixbuf> {
 /// encode leaves the original as it was.
 pub(crate) fn overwrite_in_place(pb: &gdk_pixbuf::Pixbuf, path: &Path) -> Result<()> {
     let (fmt, opts) = cap_format(path)?;
-    if fmt == "jpeg" && has_transparency(pb) {
-        anyhow::bail!(
-            "the result has transparent areas and JPEG cannot hold them. Frame it with Cover, \
-             or use a White or Colour disc, or Save PNG instead"
-        );
-    }
+    refuse_alpha_for(pb, path)?;
     // The JPEG encoder refuses RGBA outright (glycin on Ubuntu 26.04), even
     // when every pixel is opaque, so hand it RGB.
     let rgb;
@@ -1057,7 +1066,7 @@ pub(crate) fn cap_size(w: i32, h: i32, cap: i32) -> Option<(i32, i32)> {
 /// smaller, which hides re-encoding loss, and a photo cover has no alpha to
 /// need PNG for. Anything else (WebP, GIF) is refused with the reason, not
 /// silently converted.
-fn cap_format(src: &Path) -> Result<(&'static str, Vec<(&'static str, &'static str)>)> {
+pub(crate) fn cap_format(src: &Path) -> Result<(&'static str, Vec<(&'static str, &'static str)>)> {
     let ext = src
         .extension()
         .and_then(|e| e.to_str())

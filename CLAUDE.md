@@ -146,8 +146,10 @@ porting further features across.
   `ImageView::to_picker` (filled by `build_ui`: flips the page toggle). The
   grid's and list's `activate` (double-click / Enter) call it with the
   store's paths, so Edit browses exactly the grid.
-- **An Overwrite bumps `written`** (an `Rc<Cell<u64>>` passed into
-  `build_batch`), which is part of Batch's `scope_key`. The ticker idles
+- **An Overwrite, a run into the library and a Put back bump `written`**
+  (an `Rc<Cell<u64>>` passed into `build_batch`), which is part of Batch's
+  `scope_key`. After a library run or a Put back, `hold_results` keeps the
+  Last run tab showing while the grid recounts behind it. The ticker idles
   while Batch is hidden, so the recount happens when you go back: the survey
   and plan rebuild and the grid re-renders from disk.
 - **Grid thumbnails render lazily**: a cell asks for its file when first
@@ -212,19 +214,41 @@ porting further features across.
   on a loaded image, feeding history and palettes identically — is plain
   gdk-pixbuf and works everywhere, so colour-from-artwork is fully functional
   off Linux.
-- **Two writing modes with different safety.** *Batch* never writes over its
-  source, but *Overwrite* replaces the original PNG or JPEG in place, in its
-  own format (`overwrite_in_place`: JPEG at quality 92, refused when the result
-  has transparency, written to a sibling temp file and renamed over). Framing
-  alone enables it. They are one click apart in the UI, and Batch → Edit →
-  Overwrite is now the intended way to hand-fix a cover, so the music library
-  is one confirm away. Treat any change near the write path as touching user data,
-  and keep the Batch grid and dry run working — they are the guard.
+- **Three writing modes with different safety.**
+  - *Batch to a folder* never writes into its source (`guard_batch`).
+  - *Batch into the library* (`writeback.rs`, Cap / Square / Pad only)
+    **never writes over its source without keeping the original.** Per file:
+    the original is copied whole into the originals folder at the same
+    relative path (temp name, synced, length checked, renamed into its slot),
+    the result is written beside the source and renamed over it, then a
+    `swap` line goes to `ncover-log.tsv` in the originals folder; if the log
+    cannot be written the original goes straight back. A taken slot is
+    refused, so a second run can never overwrite the first original.
+    `guard_originals` refuses an originals folder that is the library, inside
+    it, or above it. *Put back last run* (`undo_last`) restores the newest
+    run not yet undone, skipping any library file whose size or mtime is not
+    what the run wrote. Cover and Fit are refused: they write a PNG under
+    another name, which would orphan ndisc's `cover_art_path`.
+  - *Overwrite* (Edit) replaces the original PNG or JPEG in place, in its
+    own format (`overwrite_in_place`: JPEG at quality 92, refused when the
+    result has transparency, written to a sibling temp file and renamed
+    over), and keeps no copy. Framing alone enables it.
+
+  The music library is one confirm away from both of the last two. Treat any
+  change near the write path as touching user data, and keep the Batch grid
+  and dry run working — they are the guard.
+- **A file's place is its full path under the scope's root (`rel_under`),
+  matched back to its plan by position.** Two releases with the same title
+  under two artists are two places, for the output folder and the originals
+  folder alike. A file that is not under the root is refused, never given a
+  fallback: `out.join(absolute)` returns the absolute path, so the old
+  `strip_prefix(..).unwrap_or(f)` would have written a folder run over the
+  source itself.
 - **It consumes `ndisc` output.** Batch can run a recipe over an ndisc-published
   discography, which makes it a downstream reader of the publish manifest. It
   publishes nothing itself and holds no keys.
 - **Cover / Fit output is always PNG.** Not a preference — the disc / label
-  mask needs an alpha channel. Cap and Square are the exception: they tidy a
+  mask needs an alpha channel. Cap, Square and Pad are the exception: they tidy a
   file, so they keep its format.
 - **Upstream lineage is real.** Forked from `xcolor` and MIT-licensed;
   CLI-side changes may have an upstream counterpart worth checking rather than

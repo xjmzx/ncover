@@ -25,6 +25,7 @@ mod palette;
 mod raster;
 mod samples;
 mod svg;
+mod writeback;
 
 use batch::*;
 use color::*;
@@ -33,6 +34,7 @@ use palette::*;
 use raster::*;
 use samples::*;
 use svg::*;
+use writeback::*;
 
 const APP_ID: &str = "io.github.xjmzx.NCover";
 const HISTORY_LIMIT: usize = 32;
@@ -90,6 +92,10 @@ struct AppData {
     /// a demo file that keeps coming back is not a demo, it is litter.
     #[serde(default)]
     seeded: bool,
+    /// Where Batch keeps the originals it replaces in the library. Chosen
+    /// once and remembered; the write-back log lives in it.
+    #[serde(default)]
+    originals: Option<PathBuf>,
 }
 
 fn default_canvas() -> i32 {
@@ -902,6 +908,13 @@ fn build_batch(
 ) -> GBox {
     let src: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
     let dst: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
+    // Output into the library (Cap, Square, Pad only), the originals kept in
+    // `kept`. Remembered between runs and launches.
+    let into_lib = Rc::new(Cell::new(false));
+    let kept: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(shared.borrow().data.originals.clone()));
+    // Set when a run into the library finishes, so the recount it triggers
+    // does not swap that run's results for the grid.
+    let hold_results = Rc::new(Cell::new(false));
     let stop = Arc::new(AtomicBool::new(false));
     // ndisc's manifest, loaded when you switch to that scope and reused at run,
     // so the count you saw and the set you process are the same read.
@@ -991,6 +1004,30 @@ fn build_batch(
     row_src.append(&b_src);
     row_src.append(&l_src);
     body.append(&row_src);
+
+    // Where the results go: a folder beside the source, or back into the
+    // library itself with the originals kept. Two equal toggles, as the scope.
+    let row_out = GBox::new(Orientation::Horizontal, 6);
+    let out_lbl = Label::new(Some("Output"));
+    out_lbl.add_css_class("dim-label");
+    row_out.append(&out_lbl);
+    let out_row = GBox::new(Orientation::Horizontal, 0);
+    out_row.add_css_class("linked");
+    out_row.add_css_class("mono-toggles");
+    out_row.set_homogeneous(true);
+    out_row.set_hexpand(true);
+    let t_folder = ToggleButton::with_label("To a folder");
+    t_folder.set_tooltip_text(Some("Write the results into an output folder, mirroring the source. The library is not touched."));
+    let t_lib = ToggleButton::with_label("Into the library");
+    t_lib.set_tooltip_text(Some(
+        "Cap, Square and Pad only. Each cover is replaced where it is, in its own name and format, and its original is copied first to the same place under an originals folder. Every swap is logged there, and Put back last run restores them. Cover and Fit write a PNG under another name, so they cannot.",
+    ));
+    t_lib.set_group(Some(&t_folder));
+    t_folder.set_active(true);
+    out_row.append(&t_folder);
+    out_row.append(&t_lib);
+    row_out.append(&out_row);
+    body.append(&row_out);
 
     let row_dst = GBox::new(Orientation::Horizontal, 6);
     let b_dst = Button::with_label("Output…");
@@ -1320,38 +1357,204 @@ fn build_batch(
         }
     ));
 
-    // The output picker.
-    for (btn, slot, lbl, title) in [(&b_dst, &dst, &l_dst, "Output folder")] {
-        btn.connect_clicked(clone!(
-            #[weak]
-            window,
-            #[strong(rename_to = slot)]
-            slot.clone(),
-            #[weak(rename_to = lbl)]
-            lbl.clone(),
-            #[strong(rename_to = title)]
-            title.to_string(),
-            move |_| {
-                let dlg = gtk::FileDialog::builder().title(&title).build();
-                dlg.select_folder(
-                    Some(&window),
-                    gio::Cancellable::NONE,
-                    clone!(
-                        #[strong]
-                        slot,
-                        #[weak]
-                        lbl,
-                        move |res| {
-                            let Ok(f) = res else { return };
-                            let Some(p) = f.path() else { return };
-                            lbl.set_text(&p.display().to_string());
-                            *slot.borrow_mut() = Some(p);
+    // The output picker. Under "Into the library" the same button picks the
+    // originals folder instead, which is remembered.
+    b_dst.connect_clicked(clone!(
+        #[weak]
+        window,
+        #[strong]
+        dst,
+        #[strong]
+        kept,
+        #[strong]
+        into_lib,
+        #[weak]
+        l_dst,
+        #[strong]
+        shared,
+        move |_| {
+            let lib = into_lib.get();
+            let dlg = gtk::FileDialog::builder()
+                .title(if lib { "Originals folder" } else { "Output folder" })
+                .build();
+            dlg.select_folder(
+                Some(&window),
+                gio::Cancellable::NONE,
+                clone!(
+                    #[strong]
+                    dst,
+                    #[strong]
+                    kept,
+                    #[weak]
+                    l_dst,
+                    #[strong]
+                    shared,
+                    move |res| {
+                        let Ok(f) = res else { return };
+                        let Some(p) = f.path() else { return };
+                        l_dst.set_text(&p.display().to_string());
+                        if lib {
+                            *kept.borrow_mut() = Some(p.clone());
+                            let mut st = shared.borrow_mut();
+                            st.data.originals = Some(p);
+                            let _ = save_data(&st.data);
+                        } else {
+                            *dst.borrow_mut() = Some(p);
                         }
-                    ),
-                );
+                    }
+                ),
+            );
+        }
+    ));
+
+    // Put back the last run into the library, from the log in the
+    // originals folder. Shown only under "Into the library".
+    let b_undo = Button::with_label("Put back last run");
+    b_undo.set_tooltip_text(Some(
+        "Restore the originals of the most recent run into the library, newest first, from the log in the originals folder. A cover changed since that run is left as it is and named. Press again for the run before.",
+    ));
+    b_undo.set_visible(false);
+    b_undo.connect_clicked(clone!(
+        #[weak]
+        window,
+        #[strong]
+        kept,
+        #[weak]
+        results,
+        #[weak]
+        main_stack,
+        #[weak]
+        l_prog,
+        #[strong]
+        written,
+        #[strong]
+        hold_results,
+        move |_| {
+            let Some(root) = kept.borrow().clone() else {
+                show_error(&window, "Choose the originals folder first.");
+                return;
+            };
+            let (_, time, n) = match last_run(&root) {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    show_error(&window, &format!("Nothing to put back: {} lists no run that has not been put back already.", root.join(WRITEBACK_LOG).display()));
+                    return;
+                }
+                Err(e) => {
+                    show_error(&window, &format!("{e:#}"));
+                    return;
+                }
+            };
+            let dlg = gtk::AlertDialog::builder()
+                .modal(true)
+                .message(format!("Put back the run of {time}?"))
+                .detail(format!(
+                    "{n} cover{} in the library go back to the originals kept in {}. A cover changed since that run is left as it is, and its original stays kept.",
+                    if n == 1 { "" } else { "s" },
+                    root.display()
+                ))
+                .buttons(["Cancel", "Put back"])
+                .cancel_button(0)
+                .default_button(0)
+                .build();
+            dlg.choose(
+                Some(&window),
+                gio::Cancellable::NONE,
+                clone!(
+                    #[weak]
+                    window,
+                    #[weak]
+                    results,
+                    #[weak]
+                    main_stack,
+                    #[weak]
+                    l_prog,
+                    #[strong]
+                    written,
+                    #[strong]
+                    hold_results,
+                    move |res| {
+                        if res.ok() != Some(1) {
+                            return;
+                        }
+                        let rep = match undo_last(&root) {
+                            Ok(Some(r)) => r,
+                            Ok(None) => return,
+                            Err(e) => return show_error(&window, &format!("{e:#}")),
+                        };
+                        while let Some(c) = results.first_child() {
+                            results.remove(&c);
+                        }
+                        for (p, why) in &rep.skipped {
+                            let l = Label::new(Some(&format!("{}  \u{2014}  {why}", p.display())));
+                            l.set_xalign(0.0);
+                            l.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+                            l.set_margin_start(6);
+                            l.add_css_class("error");
+                            results.append(&l);
+                        }
+                        l_prog.set_text(&format!(
+                            "put back run {} \u{2014} {} restored{}",
+                            rep.run,
+                            rep.restored,
+                            if rep.skipped.is_empty() { String::new() } else { format!(" \u{b7} {} left as they are", rep.skipped.len()) }
+                        ));
+                        main_stack.set_visible_child_name("results");
+                        if rep.restored > 0 {
+                            hold_results.set(true);
+                            written.set(written.get() + 1);
+                        }
+                    }
+                ),
+            );
+        }
+    ));
+
+    // Switching the output: the button, its readout, the Run button's look
+    // and Put back follow it.
+    let set_out = {
+        let into_lib = into_lib.clone();
+        let dst = dst.clone();
+        let kept = kept.clone();
+        let b_dst = b_dst.clone();
+        let l_dst = l_dst.clone();
+        let b_run = b_run.clone();
+        let b_undo = b_undo.clone();
+        move |lib: bool| {
+            into_lib.set(lib);
+            b_undo.set_visible(lib);
+            if lib {
+                b_dst.set_label("Originals\u{2026}");
+                b_dst.set_tooltip_text(Some("The folder the replaced originals are copied to, under the same path as in the library, with the log beside them. Not inside the library. Remembered."));
+                l_dst.set_text(&kept.borrow().as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "no originals folder".into()));
+                b_run.remove_css_class("suggested-action");
+                b_run.add_css_class("destructive-action");
+            } else {
+                b_dst.set_label("Output\u{2026}");
+                b_dst.set_tooltip_text(Some("Where the results go. Never the source folder — your originals are not touched."));
+                l_dst.set_text(&dst.borrow().as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "no output folder".into()));
+                b_run.remove_css_class("destructive-action");
+                b_run.add_css_class("suggested-action");
             }
-        ));
-    }
+        }
+    };
+    t_lib.connect_toggled(move |t| set_out(t.is_active()));
+    // Cover and Fit cannot go into the library: the toggle greys out, and
+    // choosing one of them while it is on goes back to a folder.
+    dd_frame.connect_selected_notify(clone!(
+        #[weak]
+        t_lib,
+        #[weak]
+        t_folder,
+        move |dd| {
+            let keeps = framing_at(dd.selected()).keeps_file();
+            if !keeps && t_lib.is_active() {
+                t_folder.set_active(true);
+            }
+            t_lib.set_sensitive(keeps);
+        }
+    ));
+    t_lib.set_sensitive(framing_at(dd_frame.selected()).keeps_file());
 
     // Switching scope swaps what the source row means. Folder → the picker is
     // live. Published → it is replaced by a read-only readout of the manifest
@@ -1560,30 +1763,21 @@ fn build_batch(
         Rc::new(move || recipe_now().map_err(|e| show_error(&window, &e)).ok())
     };
 
-    let run = {
-        let window = window.clone();
-        let dst = dst.clone();
+    // Start a run that has passed every check. `lib`: into the library, with
+    // the originals kept under `o_root`; otherwise into the output folder
+    // `o_root`.
+    let launch: Rc<dyn Fn(bool, bool, Scope, Recipe, PathBuf)> = {
         let stop = stop.clone();
         let e_match = e_match.clone();
-        let resolve_scope = resolve_scope.clone();
-        let resolve_recipe = resolve_recipe.clone();
         let results = results.clone();
         let main_stack = main_stack.clone();
         let l_prog = l_prog.clone();
         let b_dry = b_dry.clone();
         let b_run = b_run.clone();
         let b_stop = b_stop.clone();
-        Rc::new(move |dry: bool| {
-            let Some(o_root) = dst.borrow().clone() else {
-                show_error(&window, "Choose an output folder.");
-                return;
-            };
-            let Some(scope) = resolve_scope() else { return };
-            if let Err(e) = guard_batch(&scope.guard_root, &o_root) {
-                show_error(&window, &format!("{e}"));
-                return;
-            }
-            let Some(recipe) = resolve_recipe() else { return };
+        let written = written.clone();
+        let hold_results = hold_results.clone();
+        Rc::new(move |dry: bool, lib: bool, scope: Scope, recipe: Recipe, o_root: PathBuf| {
             let needle = e_match.text().to_string();
             let left_why = if recipe.framing.squares() {
                 "already square"
@@ -1620,13 +1814,46 @@ fn build_batch(
                 }
                 let _ = tx.send_blocking(BatchMsg::Total(files.len()));
 
+                // Each file's place is its FULL path under the scope's root,
+                // so two releases with the same title under two artists are
+                // two places. A file not under the root has no place and is
+                // refused: falling back to its absolute path would make
+                // `o_root.join` return the source itself.
+                let rels: Vec<std::result::Result<PathBuf, String>> =
+                    files.iter().map(|f| rel_under(f, &strip)).collect();
                 // Destinations are planned for the whole set before anything
                 // is written, so two sources can never share an output name.
-                let rels: Vec<PathBuf> = files
-                    .iter()
-                    .map(|f| f.strip_prefix(&strip).unwrap_or(f).to_path_buf())
-                    .collect();
-                let dests = plan_for(&rels, recipe);
+                // Planned over the placeable files and matched back by
+                // position, never looked up by name.
+                let dests: Vec<std::result::Result<PathBuf, String>> = if lib {
+                    // Into the library, the place is the rel itself: the
+                    // source is written where it is, its original kept there.
+                    rels.clone()
+                } else {
+                    let placeable: Vec<PathBuf> = rels.iter().filter_map(|r| r.as_ref().ok().cloned()).collect();
+                    let mut planned = plan_for(&placeable, recipe).into_iter();
+                    rels.iter()
+                        .map(|r| match r {
+                            Ok(_) => planned.next().unwrap_or_else(|| Err("not planned".into())),
+                            Err(e) => Err(e.clone()),
+                        })
+                        .collect()
+                };
+                let wb = if lib {
+                    match WriteBack::start(&o_root) {
+                        Ok(w) => Some(w),
+                        Err(e) => {
+                            let _ = tx.send_blocking(BatchMsg::One {
+                                rel: o_root.display().to_string(),
+                                result: Err(format!("{e:#}")),
+                            });
+                            let _ = tx.send_blocking(BatchMsg::Done { ok: 0, failed: 1, left: 0, stopped: true });
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
 
                 let (mut ok, mut failed, mut left) = (0usize, 0usize, 0usize);
                 let mut stopped = false;
@@ -1635,9 +1862,13 @@ fn build_batch(
                         stopped = true;
                         break;
                     }
+                    let rel = rel.unwrap_or_else(|_| f.clone());
                     let result = dest.and_then(|d| {
-                        batch_one(f, &o_root.join(d), recipe, dry)
-                            .map_err(|e| format!("{e:#}")) // {:#} = the whole context chain
+                        match &wb {
+                            Some(wb) => wb.one(f, &d, recipe, dry),
+                            None => batch_one(f, &o_root.join(d), recipe, dry),
+                        }
+                        .map_err(|e| format!("{e:#}")) // {:#} = the whole context chain
                     });
                     match &result {
                         Ok(Some(_)) => ok += 1,
@@ -1663,6 +1894,10 @@ fn build_batch(
                 b_run,
                 #[weak]
                 b_stop,
+                #[strong]
+                written,
+                #[strong]
+                hold_results,
                 async move {
                     let mut total = 0usize;
                     let mut seen = 0usize;
@@ -1693,6 +1928,10 @@ fn build_batch(
                                 } else if bad || rows < RESULT_ROWS {
                                     let l = Label::new(Some(&match &result {
                                         Ok(None) => unreachable!(),
+                                        Ok(Some(_)) if lib => format!(
+                                            "{rel}  \u{2192}  {}, original kept",
+                                            if dry { "would be replaced" } else { "replaced" }
+                                        ),
                                         Ok(Some(d)) => format!(
                                             "{}  →  {}",
                                             rel,
@@ -1729,7 +1968,12 @@ fn build_batch(
                                 let verb = if stopped { "stopped" } else { "done" };
                                 l_prog.set_text(&format!(
                                     "{verb} — {ok} {}{}{}",
-                                    if dry { "would be written" } else { "written" },
+                                    match (lib, dry) {
+                                        (true, true) => "would be replaced in the library, originals kept",
+                                        (true, false) => "replaced in the library, originals kept",
+                                        (false, true) => "would be written",
+                                        (false, false) => "written",
+                                    },
                                     if left > 0 {
                                         format!(" · {left} {left_why}, left alone")
                                     } else {
@@ -1756,12 +2000,87 @@ fn build_batch(
                                 b_dry.set_sensitive(true);
                                 b_run.set_sensitive(true);
                                 b_stop.set_sensitive(false);
+                                if lib && !dry && ok > 0 {
+                                    // Files in the library changed: recount,
+                                    // but keep this run's results on screen.
+                                    hold_results.set(true);
+                                    written.set(written.get() + 1);
+                                }
                                 break;
                             }
                         }
                     }
                 }
             ));
+        })
+    };
+
+    // Dry run and Run: check everything, then launch. A real run into the
+    // library asks first, saying what it will replace and where the
+    // originals go.
+    let run = {
+        let window = window.clone();
+        let dst = dst.clone();
+        let kept = kept.clone();
+        let into_lib = into_lib.clone();
+        let resolve_scope = resolve_scope.clone();
+        let resolve_recipe = resolve_recipe.clone();
+        let launch = launch.clone();
+        let b_run = b_run.clone();
+        Rc::new(move |dry: bool| {
+            let lib = into_lib.get();
+            let root = if lib { kept.borrow().clone() } else { dst.borrow().clone() };
+            let Some(root) = root else {
+                show_error(&window, if lib { "Choose the folder the originals are kept in." } else { "Choose an output folder." });
+                return;
+            };
+            let Some(scope) = resolve_scope() else { return };
+            let guard = if lib {
+                guard_originals(&scope.guard_root, &root)
+            } else {
+                guard_batch(&scope.guard_root, &root)
+            };
+            if let Err(e) = guard {
+                show_error(&window, &format!("{e}"));
+                return;
+            }
+            let Some(recipe) = resolve_recipe() else { return };
+            if lib && !recipe.framing.keeps_file() {
+                show_error(&window, "Only Cap, Square and Pad write into the library. Cover and Fit write a PNG under another name, which would leave ndisc pointing at the old file.");
+                return;
+            }
+            if !lib || dry {
+                launch(dry, lib, scope, recipe, root);
+                return;
+            }
+            // "Run (10 of 241 to square)" → "10".
+            let label = b_run.label().map(|s| s.to_string()).unwrap_or_default();
+            let n = label
+                .strip_prefix("Run (")
+                .and_then(|s| s.split(' ').next())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "the".into());
+            let dlg = gtk::AlertDialog::builder()
+                .modal(true)
+                .message(format!("Replace {n} covers in the library?"))
+                .detail(format!(
+                    "Each cover under {} is replaced where it is, in its own name and format. \
+                     Its original is copied first to the same place under {}, and every swap is \
+                     logged there in {WRITEBACK_LOG}. A cover whose original is already kept is \
+                     refused. Put back last run restores them.",
+                    scope.guard_root.display(),
+                    root.display()
+                ))
+                .buttons(["Cancel", "Replace"])
+                .cancel_button(0)
+                .default_button(0)
+                .build();
+            let launch = launch.clone();
+            dlg.choose(Some(&window), gio::Cancellable::NONE, move |res| {
+                if res.ok() == Some(1) {
+                    launch(false, true, scope, recipe, root);
+                }
+            });
         })
     };
 
@@ -1801,6 +2120,7 @@ fn build_batch(
     gap.set_hexpand(true);
     bar.append(&switcher);
     bar.append(&gap);
+    bar.append(&b_undo);
     bar.append(&b_before);
     bar.append(&b_open);
     let main = GBox::new(Orientation::Vertical, 8);
@@ -2103,6 +2423,8 @@ fn build_batch(
             files_head,
             #[weak]
             main_stack,
+            #[strong]
+            hold_results,
             async move {
                 let Ok(plan) = rx.recv().await else { return };
                 if sample_gen.get() != g {
@@ -2159,7 +2481,11 @@ fn build_batch(
                     .map(|(i, p)| GridItem::new(i + 1, p, &strip, recipe))
                     .collect();
                 show_plan(items, Some(recipe));
-                main_stack.set_visible_child_name("grid");
+                // After a run into the library the recount refreshes the
+                // grid behind that run's results; it does not take their place.
+                if !hold_results.replace(false) {
+                    main_stack.set_visible_child_name("grid");
+                }
             }
         ));
         glib::ControlFlow::Continue

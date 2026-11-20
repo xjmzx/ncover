@@ -11,7 +11,39 @@ to diverge. Its version numbers are independent of these.
 
 ## [Unreleased]
 
+### Added
+- **Batch can write into the library, keeping the originals.** A second
+  Output, *Into the library*, beside *To a folder*, for Cap, Square and
+  Pad: each cover is replaced where it is, in its own name and format, so
+  ndisc still finds it. Its original is first copied whole into an
+  originals folder you choose (remembered), at the same path as in the
+  library, and every swap is logged there in `ncover-log.tsv`. The run asks
+  first, and the Run button turns red while this output is on.
+  - A cover whose original is already kept is refused, so a second run
+    can never overwrite the first original.
+  - The library always holds either the old file or the new one: the
+    result is written beside it and renamed over it, and only once the
+    original's copy is safe.
+  - **Put back last run** restores the newest run's originals. A cover
+    changed since that run is left as it is and named, with its original
+    still kept.
+  - The originals folder may not be the library, inside it, or above it.
+  - Cover and Fit cannot go into the library: they write a PNG under
+    another name.
+  - Batch recounts afterwards, so the covers just fixed drop off the grid,
+    and the run's results stay on screen.
+
+  This is step 3 of the cover review loop, done until now by a desktop
+  script.
+
 ### Fixed
+- **A Batch file outside the scope's folder could be written over itself.**
+  A file found outside the folder the output mirrors (possible with a
+  published manifest whose release folders sit outside its library root)
+  fell back to its absolute path, and an absolute path joined onto the
+  output folder is the source itself. Such a file is now refused with the
+  reason. Every file's place is its whole path under that folder, so two
+  releases with the same title under two artists never share one.
 - The `.deb` declared GTK 4.10 or newer, but since 0.4.0 the app needs 4.12
   (the Batch grid). It now requires `libgtk-4-1 (>= 4.12)`, so apt refuses
   the install on 4.10 or 4.11 instead of the app failing to start.
