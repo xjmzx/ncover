@@ -11,6 +11,8 @@ to diverge. Its version numbers are independent of these.
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-11-20
+
 ### Added
 - **75% and 50%** beside Fit in the editor: the whole image at three
   quarters or half of the canvas, centred, with a margin round it. Then
@@ -317,7 +319,8 @@ became installable from a release rather than only from source.
   a Preview contact sheet and a dry run. It never writes over the source.
 - Save as PNG, or overwrite the original PNG in place.
 
-[Unreleased]: https://github.com/xjmzx/ncover/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/xjmzx/ncover/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/xjmzx/ncover/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/xjmzx/ncover/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/xjmzx/ncover/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/xjmzx/ncover/compare/v0.3.0...v0.4.0
