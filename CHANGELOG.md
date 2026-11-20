@@ -13,6 +13,11 @@ to diverge. Its version numbers are independent of these.
 
 ## [0.6.0] — 2026-11-20
 
+### Fixed
+- The `.deb` now depends on `librsvg2-common`, the SVG loader GTK reads
+  SVG files with. Opening an SVG, writing it sharp and Save SVG's own
+  checks all need it; Ubuntu desktops have it, a minimal install may not.
+
 ### Added
 - **Mask shapes.** A Mask row above the fill buttons: **Disc**, **Rounded**
   (a square with rounded corners) or **Chamfer** (corners cut), with an
