@@ -392,10 +392,16 @@ pub(crate) struct Scope {
     /// Display names for walk roots, where something better than the path is
     /// known: "Artist — Title" from the manifest. Empty for a folder.
     pub(crate) names: HashMap<PathBuf, String>,
-    /// Walk roots that contribute ONE named file instead of a walk: a list's
-    /// `cover file` column, so a release's back or inlay is never touched.
-    /// Empty for a folder or the manifest.
-    pub(crate) only: HashMap<PathBuf, PathBuf>,
+    /// Walk roots that contribute only NAMED files instead of a walk: a
+    /// list's `cover file` column, so a release's back or inlay is never
+    /// touched. Several lines may name files in ONE folder (label art: one
+    /// folder of logos), so each root holds every file named in it, in list
+    /// order. Empty for a folder or the manifest.
+    pub(crate) only: HashMap<PathBuf, Vec<PathBuf>>,
+    /// Display names for single files, where the line that named a file
+    /// also named it ("Ultra Records"). Wins over `names`, which a folder
+    /// shared by several lines cannot carry.
+    pub(crate) file_names: HashMap<PathBuf, String>,
 }
 
 impl Scope {
@@ -406,6 +412,7 @@ impl Scope {
             guard_root: root,
             names: HashMap::new(),
             only: HashMap::new(),
+            file_names: HashMap::new(),
         }
     }
 
@@ -428,6 +435,7 @@ impl Scope {
                 })
                 .collect(),
             only: HashMap::new(),
+            file_names: HashMap::new(),
         }
     }
 
@@ -443,14 +451,45 @@ impl Scope {
             guard_root: l.root.clone(),
             names: HashMap::new(),
             only: HashMap::new(),
+            file_names: HashMap::new(),
         };
+        // A folder is one root however many lines name it. A line with no
+        // cover file asks for the whole folder, which takes in anything
+        // another line named there.
+        let mut walk_whole = std::collections::HashSet::new();
+        let mut lines_in: HashMap<PathBuf, usize> = HashMap::new();
         for line in l.lines.iter().filter(|line| l.selects(line, job)) {
-            s.roots.push(line.folder.clone());
+            let n = lines_in.entry(line.folder.clone()).or_default();
+            if *n == 0 {
+                s.roots.push(line.folder.clone());
+            }
+            *n += 1;
+            match &line.cover {
+                Some(f) => {
+                    let named = s.only.entry(line.folder.clone()).or_default();
+                    if !named.contains(f) {
+                        named.push(f.clone());
+                    }
+                    if let Some(n) = &line.name {
+                        s.file_names.insert(f.clone(), n.clone());
+                    }
+                }
+                None => {
+                    walk_whole.insert(line.folder.clone());
+                }
+            }
             if let Some(n) = &line.name {
                 s.names.insert(line.folder.clone(), n.clone());
             }
-            if let Some(f) = &line.cover {
-                s.only.insert(line.folder.clone(), f.clone());
+        }
+        for f in &walk_whole {
+            s.only.remove(f);
+        }
+        // A folder several lines share is called by its own name, not by
+        // whichever line came last.
+        for (f, n) in lines_in {
+            if n > 1 {
+                s.names.remove(&f);
             }
         }
         s
@@ -463,6 +502,9 @@ impl Scope {
     /// rather than both the scope's own name. The macOS sibling's
     /// `nameForFile`, ported.
     pub(crate) fn name_for_file(&self, file: &Path) -> String {
+        if let Some(n) = self.file_names.get(file) {
+            return n.clone();
+        }
         let mut dir = file.parent();
         while let Some(d) = dir {
             if let Some(n) = self.names.get(d) {
@@ -517,9 +559,12 @@ pub(crate) fn walk_scope(scope: &Scope, needle: &str) -> (Vec<(usize, PathBuf)>,
     let mut errors = Vec::new();
     for (i, root) in scope.roots.iter().enumerate() {
         let mut found = Vec::new();
-        if let Some(file) = scope.only.get(root) {
-            if let Err(e) = named_image(file, needle, &mut found) {
-                errors.push((root.clone(), format!("{e:#}")));
+        if let Some(files) = scope.only.get(root) {
+            // One error per missing file, each naming it, all under this root.
+            for file in files {
+                if let Err(e) = named_image(file, needle, &mut found) {
+                    errors.push((root.clone(), format!("{e:#}")));
+                }
             }
         } else if let Err(e) = find_images(root, needle, &mut found) {
             errors.push((root.clone(), format!("{e:#}")));
@@ -2118,6 +2163,7 @@ mod batch_tests {
             guard_root: root,
             names: HashMap::new(),
             only: HashMap::new(),
+            file_names: HashMap::new(),
         };
         let s = survey_batch(&scope, "");
         assert_eq!(s.total, 1, "the count must match what a run writes");
@@ -2239,6 +2285,53 @@ relative/folder\t-\t-
         assert_eq!(s.total, find_in_scope(&scope, "cover").0.len());
         // Both folders sit under Artist, so that is the mirror prefix.
         assert_eq!(s.groups[0].files, ["Release/cover.jpg"], "mirrored under the common parent");
+    }
+
+    #[test]
+    fn many_lines_naming_files_in_one_folder_take_every_one_of_them() {
+        // Label art: one folder of logos, one line per label. Keyed by
+        // folder, the list kept only the last line's file.
+        let base = tmpdir("list-shared");
+        let logos = base.join("labels");
+        fs::create_dir_all(&logos).unwrap();
+        for f in ["Ultra.Records.label.jpg", "Warp.label.png", "Mute.label.jpg", "unlisted.jpg"] {
+            let fmt = if f.ends_with("png") { "png" } else { "jpeg" };
+            solid(400, 300, false, 0x808080ff).savev(logos.join(f), fmt, &[]).unwrap();
+        }
+        let line = |f: &str, n: &str| {
+            format!("{d}\t{d}/{f}\t{n}\t-\t-\t-\t-\tncover:square\n", d = logos.display())
+        };
+        let text = [
+            line("Ultra.Records.label.jpg", "Ultra Records"),
+            line("Warp.label.png", "Warp"),
+            line("Mute.label.jpg", "Mute"),
+            line("Gone.label.jpg", "Gone"),
+        ]
+        .concat();
+        let scope = Scope::list(&parse_cover_list(&text), Some("square"));
+        assert_eq!(scope.roots, [logos.clone()], "one folder is one root");
+        assert!(scope.names.is_empty(), "a shared folder carries no one line's name");
+
+        let s = survey_batch(&scope, "");
+        let mut got: Vec<_> = s.files.iter().map(|f| f.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        got.sort();
+        assert_eq!(got, ["Mute.label.jpg", "Ultra.Records.label.jpg", "Warp.label.png"], "every named file, and only those");
+        assert_eq!(s.unreadable, 1, "the missing one is counted, by itself");
+        assert_eq!(s.empty_roots, 0);
+        assert_eq!(s.total, find_in_scope(&scope, "").0.len(), "the count is the run");
+        for (f, n) in s.files.iter().zip(&s.names) {
+            let want = match f.file_name().unwrap().to_str().unwrap() {
+                "Ultra.Records.label.jpg" => "Ultra Records",
+                "Warp.label.png" => "Warp",
+                _ => "Mute",
+            };
+            assert_eq!(n, want, "each file is named by its own line");
+        }
+
+        // A line with no cover file for that folder asks for all of it.
+        let whole = format!("{text}{}\n", logos.display());
+        let all = survey_batch(&Scope::list(&parse_cover_list(&whole), None), "");
+        assert_eq!(all.total, 4, "the walk takes the unlisted file too");
     }
 
     #[test]

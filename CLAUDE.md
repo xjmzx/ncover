@@ -132,6 +132,12 @@ porting further features across.
 - **A file's name in the grid and Files list is `Scope::name_for_file`**:
   the record for the nearest folder above it, else its folder under the
   scope. The macOS `nameForFile`, ported; keep the two answering alike.
+- **A list's named files are kept per line, its roots per folder**
+  (`Scope::only: folder → Vec<file>`, `file_names` per file). Label art is
+  many labels in one folder, so a map of one file per folder ran a whole
+  label list over one logo, with the survey agreeing. A line naming only
+  the folder still walks all of it. The Mac's parity plan carries this as
+  F7, with the reasoning; label art reaches n.cover only as list lines.
 - **Batch is a page of its own** (header switch Edit · Batch · Palettes · ⓘ Help, the Help page built by `build_help`; the `tips` setting now means "open on Help at launch"; the Edit page was "Picker" until 0.4.0, and the code still calls it `picker` / `view_pick`).
   It is still built inside `build_image_view`, because its size picker is
   bound to the canvas size, and handed out in `ImageView`. The right side is

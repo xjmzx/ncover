@@ -49,6 +49,13 @@ to diverge. Its version numbers are independent of these.
   keeps its release's name. The rule the macOS sibling already follows.
 
 ### Fixed
+- **A list naming several files in one folder took only the last.** The
+  list scope kept one named file per folder, so a folder of label logos
+  with a line per label ran over one logo. Every file a line names is
+  taken now, each under its own line's name, and a missing one is counted
+  by itself. A folder named by several lines is one root, called by its
+  own name; a line naming the folder alone still takes all of it. Present
+  since the list scope (0.4.0).
 - **A Batch file outside the scope's folder could be written over itself.**
   A file found outside the folder the output mirrors (possible with a
   published manifest whose release folders sit outside its library root)
