@@ -30,10 +30,15 @@ X11 screen picker and grew into a small artwork tool. Part of the `n.*` suite.
   an SVG (its *declared* colours, with fonts and text).
 - Place a source on a square canvas (200–1000 px) with drag, zoom, snapping and a
   grid.
-- **Build:** a blank canvas, Invert, a background colour behind the picture, centred squares, and a disc / label mask
-  (alpha / white / colour / gradient corners) — the steps stack.
+- **Build:** a blank canvas, Invert, a background colour behind the picture,
+  centred squares, and a mask — disc, rounded or chamfered square, fitted to
+  the canvas or to the artwork — with alpha / white / colour / gradient
+  corners. The steps stack.
 - A **Source / Result** rail to compare the raw image against what you built.
-- Save as PNG, or **Overwrite** the original PNG or JPEG in place, in its own format.
+- Save as PNG or **SVG** (when every step has a vector form; the tooltip says
+  why when not), or **Overwrite** the original PNG or JPEG in place, in its
+  own format. **Template** keeps an image as a faint guide that is never
+  written, to trace over.
 - **Batch** the same recipe over a folder, a list of release folders (such
   as ndisc's Export list), or an ndisc-published discography, with a live
   grid of every file it would touch and a dry run. It writes to an output

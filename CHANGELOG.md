@@ -11,6 +11,35 @@ to diverge. Its version numbers are independent of these.
 
 ## [Unreleased]
 
+### Added
+- **Mask shapes.** A Mask row above the fill buttons: **Disc**, **Rounded**
+  (a square with rounded corners) or **Chamfer** (corners cut), with an
+  amount for the last two — a percent of half the side, so Rounded at 100%
+  is the disc. Alpha / White / Colour / Gradient then apply that shape. One
+  routine draws every shape from its signed distance (ported from the
+  macOS sibling), so the antialiased rim and the gradient work alike for
+  all three; the disc is unchanged to the pixel.
+- **Mask fit: Canvas or Artwork.** Artwork fits the mask to the square
+  around what is drawn at that point, so a disc over an inset logo is a
+  disc of the logo, not of the canvas.
+- **Save SVG…** beside Save PNG: the composition as SVG, every step a
+  vector — the source as a nested `<svg>` (its own paths untouched), a
+  mask as a clipPath with its fill clipped to the shape's inverse, Invert
+  as a colour matrix, a square as a rect, a background as a rect drawn
+  first. On only when every step has a vector form; when off, its tooltip
+  says why ("the source is a bitmap", or "step 3, Rounded with a gradient,
+  has no vector form: a gradient only follows a disc"). A Blank canvas is
+  a vector source too. Tests rasterise the exported SVG with librsvg and
+  hold it to the screen's render.
+- **Template**, a toggle beside the framing buttons: the image is placed
+  and shown as a faint ghost, but not drawn and never written. Build over
+  it and save the build, as SVG too, even when the image is a PNG or JPEG.
+  Toggling keeps the placement; undo puts it back.
+- **SVG sources are written sharp.** Save and Overwrite redraw an SVG
+  through librsvg at the size it is placed, instead of resampling the
+  1024 px raster it was opened at, so an enlarged SVG keeps clean edges.
+  The preview keeps the cached raster, so dragging stays fast.
+
 ## [0.5.2] — 2026-11-20
 
 ### Added

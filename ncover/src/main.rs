@@ -25,6 +25,7 @@ mod palette;
 mod raster;
 mod samples;
 mod svg;
+mod vector;
 mod writeback;
 
 use batch::*;
@@ -34,6 +35,7 @@ use palette::*;
 use raster::*;
 use samples::*;
 use svg::*;
+use vector::*;
 use writeback::*;
 
 const APP_ID: &str = "io.github.xjmzx.NCover";
@@ -3121,6 +3123,18 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
     // Created here, laid out in the Disc row below: `mutate` keeps them honest.
     let b_save = Button::with_label("Save PNG…");
     b_save.set_sensitive(false);
+    // Save as SVG: on only when every step has a vector form; when off, the
+    // tooltip says which step stops it.
+    let b_save_svg = Button::with_label("Save SVG…");
+    b_save_svg.set_sensitive(false);
+    // Template: the source is placed but not drawn, a faint guide to trace
+    // over. It never reaches the file, so a bitmap template does not stop SVG.
+    let b_template = ToggleButton::with_label("Template");
+    b_template.set_tooltip_text(Some(
+        "Use the image as a guide only: placed and shown faintly, never written. Build over it (squares, a Blank-style design) and save as SVG even when the image is a PNG or JPEG.",
+    ));
+    b_template.set_sensitive(false);
+    ctl.append(&b_template);
     // Overwrite writes the result back over the ORIGINAL file, in its own
     // format — only offered for a PNG or JPEG source (`src_can_overwrite`).
     let b_overwrite = Button::with_label("Overwrite");
@@ -3176,12 +3190,29 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
         let window = window.clone();
         let src_path = src_path.clone();
         let b_save = b_save.clone();
+        let b_save_svg = b_save_svg.clone();
+        let b_template = b_template.clone();
         let b_overwrite = b_overwrite.clone();
         let canvas = canvas.clone();
         let size_dd = size_dd.clone();
         let shared = shared.clone();
         Rc::new(move |next: Composition| {
             let built = next.has_build();
+            match next.vector_refusal() {
+                None => {
+                    b_save_svg.set_sensitive(true);
+                    b_save_svg.set_tooltip_text(Some("Write the composition as SVG: the source and every step as vectors"));
+                }
+                Some(why) => {
+                    b_save_svg.set_sensitive(false);
+                    b_save_svg.set_tooltip_text(Some(&format!("No SVG: {why}")));
+                }
+            }
+            // The toggle follows the document, so undo puts it back too.
+            b_template.set_sensitive(true);
+            if b_template.is_active() != next.is_template() {
+                b_template.set_active(next.is_template());
+            }
             let rendered = if built {
                 match render_raster(&next) {
                     Ok(pb) => Some(pb),
@@ -3332,6 +3363,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
             // no canvas, no grid. A plain look at what you loaded.
             let src = doc_src(&doc.borrow());
             let place = doc_place(&doc.borrow());
+            let ghost = doc.borrow().as_ref().is_some_and(|d| d.is_template());
             if vmode == ViewMode::Source {
                 if let Some(pb) = src.clone() {
                     let (ox, oy, sc) = fitted(pb.width() as f64, pb.height() as f64, w, h);
@@ -3378,7 +3410,10 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
                     cr.source().set_filter(gtk::cairo::Filter::Nearest);
                 }
                 let _ = cr.paint();
-            } else if let Some(pb) = src {
+            }
+            // The placed source: drawn as the picture when nothing is built,
+            // and as a faint ghost over everything when it is a Template.
+            if let Some(pb) = src.filter(|_| ghost || result.borrow().is_none()) {
                 let p = place;
                 cr.save().ok();
                 cr.translate(p.dx, p.dy);
@@ -3388,7 +3423,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
                 if p.scale * view > 1.0 {
                     cr.source().set_filter(gtk::cairo::Filter::Nearest);
                 }
-                let _ = cr.paint();
+                let _ = if ghost { cr.paint_with_alpha(0.3) } else { cr.paint() };
                 cr.restore().ok();
             }
 
@@ -3822,8 +3857,52 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
     // Disc mask with four corner treatments. Solid/Gradient take their colours
     // from what you have already picked — the palettes ARE the input, which is
     // the whole reason this lives in a colour tool rather than an image editor.
+    // ---- Mask row: which shape, how much, fitted to what -------------------
+    // The fill buttons below apply it. Rounded and Chamfer take an amount (a
+    // fraction of half the side: Rounded at 100% is the disc); Artwork fits
+    // the mask to what is drawn rather than to the canvas.
+    let msk = GBox::new(Orientation::Horizontal, 6);
+    let msk_lbl = Label::new(Some("Mask"));
+    msk_lbl.add_css_class("dim-label");
+    msk.append(&msk_lbl);
+    let mask_shape = gtk::DropDown::from_strings(&["Disc", "Rounded", "Chamfer"]);
+    mask_shape.set_tooltip_text(Some(
+        "The shape the fill buttons mask to: a disc, a square with rounded corners, or a square with its corners cut",
+    ));
+    msk.append(&mask_shape);
+    let mask_amount = gtk::Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
+    mask_amount.set_value(25.0);
+    mask_amount.set_hexpand(true);
+    mask_amount.set_draw_value(true);
+    mask_amount.set_value_pos(gtk::PositionType::Right);
+    mask_amount.set_tooltip_text(Some(
+        "Rounded: the corner radius; Chamfer: the corner cut. As a percent of half the side. Rounded at 100% is the disc.",
+    ));
+    mask_amount.set_visible(false);
+    msk.append(&mask_amount);
+    let mask_gap = GBox::new(Orientation::Horizontal, 0);
+    mask_gap.set_hexpand(true);
+    msk.append(&mask_gap);
+    mask_shape.connect_selected_notify(clone!(
+        #[weak]
+        mask_amount,
+        #[weak]
+        mask_gap,
+        move |dd| {
+            let amount = dd.selected() != 0;
+            mask_amount.set_visible(amount);
+            mask_gap.set_visible(!amount);
+        }
+    ));
+    let mask_fit = gtk::DropDown::from_strings(&["Canvas", "Artwork"]);
+    mask_fit.set_tooltip_text(Some(
+        "Canvas: the mask fills the canvas. Artwork: the mask fits the square around what is drawn, so a disc over an inset logo is a disc of the logo.",
+    ));
+    msk.append(&mask_fit);
+    box_.append(&msk);
+
     let tpl = GBox::new(Orientation::Horizontal, 6);
-    let tpl_lbl = Label::new(Some("Disc"));
+    let tpl_lbl = Label::new(Some("Fill"));
     tpl_lbl.add_css_class("dim-label");
     tpl.append(&tpl_lbl);
 
@@ -3839,12 +3918,14 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
     let b_reset = Button::with_label("Reset");
     b_reset.set_tooltip_text(Some("Back to the original image"));
 
-    for b in [&b_alpha, &b_white, &b_solid, &b_grad, &b_reset, &b_save, &b_overwrite] {
+    for b in [&b_alpha, &b_white, &b_solid, &b_grad, &b_reset, &b_save, &b_save_svg, &b_overwrite] {
         b.set_sensitive(false);
         tpl.append(b);
     }
     tpl.set_visible(false);
     box_.append(&tpl);
+    // The mask row shows and hides with the fill row.
+    tpl.bind_property("visible", &msk, "visible").sync_create().build();
 
     // ---- Build row: invert + composited squares (label-artwork primitives) --
     // These COMPOSE with each other and with the disc, each acting on whatever is
@@ -3959,6 +4040,9 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
         let push_op = push_op.clone();
         let shared = shared.clone();
         let window = window.clone();
+        let mask_shape = mask_shape.clone();
+        let mask_amount = mask_amount.clone();
+        let mask_fit = mask_fit.clone();
         Rc::new(move |fill_kind: u8| {
             let (cur, prev) = {
                 let s = shared.borrow();
@@ -3988,9 +4072,16 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
                     }
                 },
             };
-            // The disc masks whatever is on the canvas now — the framed source,
-            // or a design you have already built up.
-            push_op(Operation::Disc(fill));
+            // The mask applies to whatever is on the canvas now — the framed
+            // source, or a design you have already built up.
+            let amount = mask_amount.value() / 100.0;
+            let shape = match mask_shape.selected() {
+                1 => Mask::Rounded(amount),
+                2 => Mask::Chamfer(amount),
+                _ => Mask::Disc,
+            };
+            let fit = if mask_fit.selected() == 1 { MaskFit::Artwork } else { MaskFit::Canvas };
+            push_op(Operation::Mask { shape, fill, fit });
         })
     };
 
@@ -4087,6 +4178,59 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
                     }
                 ),
             );
+        }
+    ));
+    b_save_svg.connect_clicked(clone!(
+        #[weak]
+        window,
+        #[strong]
+        doc,
+        #[strong]
+        name,
+        move |_| {
+            let Some(d) = doc.borrow().clone() else { return };
+            let svg = match render_vector(&d) {
+                Ok(t) => t,
+                Err(e) => return show_error(&window, &format!("No SVG: {e:#}")),
+            };
+            let stem = name
+                .borrow()
+                .rsplit_once('.')
+                .map(|(a, _)| a.to_string())
+                .unwrap_or_else(|| name.borrow().clone());
+            let dlg = gtk::FileDialog::builder()
+                .title("Save SVG")
+                .initial_name(format!("{stem}-out.svg"))
+                .build();
+            dlg.save(
+                Some(&window),
+                gio::Cancellable::NONE,
+                clone!(
+                    #[weak]
+                    window,
+                    move |res| {
+                        let Ok(file) = res else { return };
+                        let Some(path) = file.path() else { return };
+                        if let Err(e) = fs::write(&path, &svg) {
+                            show_error(&window, &format!("Save failed: {e}"));
+                        }
+                    }
+                ),
+            );
+        }
+    ));
+    b_template.connect_toggled(clone!(
+        #[strong]
+        doc,
+        #[strong]
+        mutate,
+        move |t| {
+            let Some(mut d) = doc.borrow().clone() else { return };
+            if d.is_template() == t.is_active() {
+                return; // the document already says so (undo, a new file)
+            }
+            d.set_template(t.is_active());
+            mutate(d, None);
         }
     ));
     // Overwrite the ORIGINAL file. Irreversible, and often a file in the music
@@ -4323,7 +4467,15 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
             // (Undo back into the previous file would be a surprise, and its
             // Overwrite target is already gone.)
             history.borrow_mut().clear();
-            show_doc(Composition::new(pb, canvas.get()));
+            let mut d = Composition::new(pb, canvas.get());
+            // An SVG keeps its file, so Save and Overwrite redraw it at the
+            // placed size rather than resample the first raster.
+            if is_svg {
+                d.source.svg = tip.as_deref().map(PathBuf::from);
+            }
+            // Blank has no file and a vector form of its own (white).
+            d.source.blank = tip.is_none() && name.borrow().as_str() == "blank";
+            show_doc(d);
             sync_history();
             ctl.set_visible(true);
             b_grid.set_sensitive(true);

@@ -120,6 +120,14 @@ Two things the plan did not foresee:
 UI: three shape buttons (disc / rounded / chamfer) with an amount slider shown
 for the latter two, and a Canvas | Artwork toggle.
 
+**Status (2026-11-20): done, unreleased.** `Mask::{Disc, Rounded, Chamfer}`
+with `signed_distance`, `apply_mask` (the disc byte-identical; `disc_template`
+kept as its wrapper), `MaskFit` + `drawn_region`, a Mask row (shape dropdown,
+amount slider, Canvas | Artwork) feeding the fill buttons. Area-averaged
+shrinking was already in (0.4.0). SVG: Save / Overwrite redraw the file at
+the placed size (`Source.svg`); the preview keeps the cached raster rather
+than re-rendering on zoom end, which is the one part left as planned.
+
 Release as **0.3.0**.
 
 ## Phase 3: vector export, template and background
@@ -158,6 +166,16 @@ output can be verified against the same renderer that reads it.
   gradient-agreement test is the model).
 
 Release as **0.4.0**.
+
+**Status (2026-11-20): done, unreleased** (Background shipped in 0.4.0).
+`vector.rs`: `render_vector`, `Operation::has_vector_form` (gradient on a
+non-disc mask refused), `Composition::vector_refusal`, `nested_svg`
+(re-heads the root, adds a viewBox from width/height when missing), Blank as
+a vector source (`Source.blank`), `Operation::Template` with `set_template`
+(placement kept, ghost at 30% in the canvas draw). Agreement tests rasterise
+the export with librsvg against `render_raster`: mean channel difference
+under 3, under 2% of pixels further apart than a rim's antialiasing. UI:
+Save SVG… (off with the reason in its tooltip), Template toggle.
 
 ## Phase 4: batch says what it will touch
 

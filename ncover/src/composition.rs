@@ -23,17 +23,28 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Source {
     pub(crate) raster: gdk_pixbuf::Pixbuf,
+    /// The file, when the source is an SVG: Save and Overwrite redraw it at
+    /// the size it is placed, through librsvg, instead of resampling the
+    /// raster it was first drawn at. None for a raster source.
+    pub(crate) svg: Option<PathBuf>,
+    /// A Blank canvas: flat white, whose vector form is a white rect.
+    pub(crate) blank: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Operation {
     /// Draw the source onto the canvas at this placement.
     Place(Placement),
-    /// The disc mask, with its corner treatment. Colours are resolved when the
+    /// A mask (disc, rounded or chamfered square) with its outer fill, fitted
+    /// to the canvas or to what is drawn so far. Colours are resolved when the
     /// step is added, so the step means the same thing later.
-    Disc(OuterFill),
+    Mask { shape: Mask, fill: OuterFill, fit: MaskFit },
     /// Invert RGB, leaving alpha alone.
     Invert,
+    /// The source, placed and NOT drawn: a guide to trace over (shown as a
+    /// faint ghost), which never reaches the file. Toggling Template turns
+    /// `Place` into this and back, so the placement survives.
+    Template(Placement),
     /// An opaque, centred square; `frac` is its side as a fraction of the canvas.
     Square { frac: f64, colour: Rgb },
     /// A solid colour behind everything so far; the canvas comes out opaque.
@@ -45,8 +56,9 @@ impl Operation {
     pub(crate) fn label(&self) -> &'static str {
         match self {
             Operation::Place(_) => "Place",
-            Operation::Disc(_) => "Disc",
+            Operation::Mask { shape, .. } => shape.label(),
             Operation::Invert => "Invert",
+            Operation::Template(_) => "Template",
             Operation::Square { .. } => "Square",
             Operation::Background(_) => "Background",
         }
@@ -66,7 +78,7 @@ impl Composition {
     pub(crate) fn new(raster: gdk_pixbuf::Pixbuf, canvas: i32) -> Composition {
         let p = Placement::cover(raster.width(), raster.height(), canvas);
         Composition {
-            source: Source { raster },
+            source: Source { raster, svg: None, blank: false },
             canvas,
             ops: vec![Operation::Place(p)],
         }
@@ -77,29 +89,48 @@ impl Composition {
         self.ops
             .iter()
             .find_map(|op| match op {
-                Operation::Place(p) => Some(*p),
+                Operation::Place(p) | Operation::Template(p) => Some(*p),
                 _ => None,
             })
             .unwrap_or(Placement { dx: 0.0, dy: 0.0, scale: 1.0 })
     }
 
     /// Replace the placement, inserting one at the front if there is none.
+    /// The gestures edit "where the source sits" without caring whether it is
+    /// drawn, so a Template stays a Template.
     pub(crate) fn set_placement(&mut self, p: Placement) {
-        match self.ops.iter_mut().find(|op| matches!(op, Operation::Place(_))) {
+        match self.ops.iter_mut().find(|op| matches!(op, Operation::Place(_) | Operation::Template(_))) {
+            Some(op @ Operation::Template(_)) => *op = Operation::Template(p),
             Some(op) => *op = Operation::Place(p),
             None => self.ops.insert(0, Operation::Place(p)),
+        }
+    }
+
+    /// Is the source a guide rather than drawn?
+    pub(crate) fn is_template(&self) -> bool {
+        self.ops.iter().any(|op| matches!(op, Operation::Template(_)))
+    }
+
+    /// Draw the source, or keep it as a guide only; the placement is kept.
+    pub(crate) fn set_template(&mut self, on: bool) {
+        for op in self.ops.iter_mut() {
+            match (*op, on) {
+                (Operation::Place(p), true) => *op = Operation::Template(p),
+                (Operation::Template(p), false) => *op = Operation::Place(p),
+                _ => {}
+            }
         }
     }
 
     /// True once anything beyond the placement has been added. The UI freezes
     /// the framing while this holds — the steps were judged against it.
     pub(crate) fn has_build(&self) -> bool {
-        self.ops.iter().any(|op| !matches!(op, Operation::Place(_)))
+        self.ops.iter().any(|op| !matches!(op, Operation::Place(_) | Operation::Template(_)))
     }
 
     /// Back to just the placed source (the Reset button).
     pub(crate) fn clear_build(&mut self) {
-        self.ops.retain(|op| matches!(op, Operation::Place(_)));
+        self.ops.retain(|op| matches!(op, Operation::Place(_) | Operation::Template(_)));
     }
 
     /// Change the output size. The framing is rescaled, not reset. The build
@@ -110,6 +141,16 @@ impl Composition {
         self.set_placement(p);
         self.clear_build();
     }
+}
+
+/// A mask step: fitted to the canvas, or to the square bounding what is drawn
+/// at this point in the list (falling back to the canvas when nothing is).
+fn mask_step(cur: &gdk_pixbuf::Pixbuf, shape: Mask, fill: OuterFill, fit: MaskFit) -> Result<gdk_pixbuf::Pixbuf> {
+    let region = match fit {
+        MaskFit::Canvas => None,
+        MaskFit::Artwork => drawn_region(cur),
+    };
+    apply_mask(cur, shape, fill, region)
 }
 
 /// A canvas with nothing on it: every pixel transparent.
@@ -127,8 +168,9 @@ pub(crate) fn render_raster(doc: &Composition) -> Result<gdk_pixbuf::Pixbuf> {
     for op in &doc.ops {
         cur = match *op {
             Operation::Place(p) => compose(&doc.source.raster, p, doc.canvas)?,
-            Operation::Disc(fill) => disc_template(&cur, fill)?,
+            Operation::Mask { shape, fill, fit } => mask_step(&cur, shape, fill, fit)?,
             Operation::Invert => invert_rgb(&cur)?,
+            Operation::Template(_) => cur, // a guide, never a mark
             Operation::Square { frac, colour } => stamp_square(&cur, frac, colour)?,
             Operation::Background(c) => fill_behind(&cur, c)?,
         };
@@ -146,9 +188,10 @@ pub(crate) fn render_for_write(doc: &Composition) -> Result<gdk_pixbuf::Pixbuf> 
     let mut cur = empty_canvas(doc.canvas)?;
     for op in &doc.ops {
         cur = match *op {
-            Operation::Place(p) => place_for_write(&doc.source.raster, p, doc.canvas)?,
-            Operation::Disc(fill) => disc_template(&cur, fill)?,
+            Operation::Place(p) => place_for_write(&doc.source, p, doc.canvas)?,
+            Operation::Mask { shape, fill, fit } => mask_step(&cur, shape, fill, fit)?,
             Operation::Invert => invert_rgb(&cur)?,
+            Operation::Template(_) => cur, // a guide, never a mark
             Operation::Square { frac, colour } => stamp_square(&cur, frac, colour)?,
             Operation::Background(c) => fill_behind(&cur, c)?,
         };
@@ -156,7 +199,18 @@ pub(crate) fn render_for_write(doc: &Composition) -> Result<gdk_pixbuf::Pixbuf> 
     Ok(cur)
 }
 
-fn place_for_write(src: &gdk_pixbuf::Pixbuf, p: Placement, canvas: i32) -> Result<gdk_pixbuf::Pixbuf> {
+fn place_for_write(source: &Source, p: Placement, canvas: i32) -> Result<gdk_pixbuf::Pixbuf> {
+    let src = &source.raster;
+    // An SVG is drawn again at exactly the size it is placed, so its edges
+    // are as sharp as librsvg makes them at that size — enlarged or shrunk.
+    // If that fails (the file moved), the raster below still writes it.
+    if let Some(path) = &source.svg {
+        let w = ((src.width() as f64 * p.scale).round() as i32).max(1);
+        let h = ((src.height() as f64 * p.scale).round() as i32).max(1);
+        if let Ok(drawn) = gdk_pixbuf::Pixbuf::from_file_at_scale(path, w, h, false) {
+            return compose(&drawn, Placement { dx: p.dx.round(), dy: p.dy.round(), scale: 1.0 }, canvas);
+        }
+    }
     if p.scale >= 1.0 {
         return compose(src, p, canvas);
     }
@@ -399,7 +453,7 @@ mod composition_tests {
             outer: Rgb { r: 0, g: 0, b: 255 },
         };
         let sq = Operation::Square { frac: 0.4, colour: Rgb { r: 0, g: 0, b: 0 } };
-        d.ops.extend([sq, Operation::Invert, Operation::Disc(fill)]);
+        d.ops.extend([sq, Operation::Invert, Operation::Mask { shape: Mask::Disc, fill, fit: MaskFit::Canvas }]);
 
         let mut by_hand = compose(&d.source.raster, d.placement(), 200).unwrap();
         by_hand = stamp_square(&by_hand, 0.4, Rgb { r: 0, g: 0, b: 0 }).unwrap();
@@ -407,6 +461,33 @@ mod composition_tests {
         by_hand = disc_template(&by_hand, fill).unwrap();
 
         assert_eq!(bytes(&render_raster(&d).unwrap()), bytes(&by_hand));
+    }
+
+    #[test]
+    fn an_svg_is_redrawn_at_the_placed_size_when_written() {
+        let dir = std::env::temp_dir().join("ncover-svg-redraw");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("disc.svg");
+        std::fs::write(
+            &path,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100"><circle cx="50" cy="50" r="47" fill="#c03"/></svg>"##,
+        )
+        .unwrap();
+        let first = gdk_pixbuf::Pixbuf::from_file_at_scale(&path, 100, 100, true).unwrap();
+        // Placed at 4× on a 400 canvas: enlarged from the 100 px raster.
+        let mut d = Composition::new(first, 400);
+        d.set_placement(Placement { dx: 0.0, dy: 0.0, scale: 4.0 });
+        let resampled = render_for_write(&d).unwrap();
+        d.source.svg = Some(path.clone());
+        let redrawn = render_for_write(&d).unwrap();
+        let direct = gdk_pixbuf::Pixbuf::from_file_at_scale(&path, 400, 400, false).unwrap();
+        let want = compose(&direct, Placement { dx: 0.0, dy: 0.0, scale: 1.0 }, 400).unwrap();
+        assert_eq!(bytes(&redrawn), bytes(&want), "written exactly as librsvg draws it at 400");
+        assert_ne!(bytes(&redrawn), bytes(&resampled), "not the 100 px raster blown up");
+        // A file that has gone falls back to the raster, rather than failing.
+        d.source.svg = Some(dir.join("gone.svg"));
+        assert_eq!(bytes(&render_for_write(&d).unwrap()), bytes(&resampled));
     }
 
     #[test]
@@ -422,7 +503,10 @@ mod composition_tests {
     fn clear_build_keeps_only_the_placement() {
         let mut d = Composition::new(src(10, 10, 0xffffffff), 100);
         let p = d.placement();
-        d.ops.extend([Operation::Invert, Operation::Disc(OuterFill::Alpha)]);
+        d.ops.extend([
+            Operation::Invert,
+            Operation::Mask { shape: Mask::Disc, fill: OuterFill::Alpha, fit: MaskFit::Canvas },
+        ]);
         assert!(d.has_build());
         d.clear_build();
         assert_eq!(d.ops, vec![Operation::Place(p)]);

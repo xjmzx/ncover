@@ -295,13 +295,125 @@ pub(crate) fn sample(pb: &gdk_pixbuf::Pixbuf, bytes: &[u8], x: i32, y: i32) -> (
     )
 }
 
-/// Mask `src` into a disc inscribed in a square canvas, filling the corners
-/// per `fill`.
+/// A mask is a signed distance function, not a shape special case: negative
+/// inside, positive outside, in pixels. Coverage and the corner gradient both
+/// derive from it, so a new shape is a new distance and nothing else. Ported
+/// from the macOS sibling's `Mask.signedDistance`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Mask {
+    Disc,
+    /// Corner radius as a fraction of half the canvas. At 1.0 it IS the disc,
+    /// so the slider runs continuously from square to circle.
+    Rounded(f64),
+    /// Corner cut as a fraction of half the canvas. At 1.0 the octagon has
+    /// closed into a diamond.
+    Chamfer(f64),
+}
+
+impl Mask {
+    /// Signed distance from (x, y) to the shape inscribed in a `size` square.
+    pub(crate) fn signed_distance(self, x: f64, y: f64, size: f64) -> f64 {
+        let c = size / 2.0;
+        let (px, py) = (x - c, y - c);
+        match self {
+            Mask::Disc => (px * px + py * py).sqrt() - c,
+            Mask::Rounded(f) => {
+                // Shrink the box by the radius, measure to it, subtract the radius.
+                let r = f.clamp(0.0, 1.0) * c;
+                let qx = px.abs() - (c - r);
+                let qy = py.abs() - (c - r);
+                let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
+                outside + qx.max(qy).min(0.0) - r
+            }
+            Mask::Chamfer(f) => {
+                // A box cut by the two diagonals through (c - i, c) and (c, c - i).
+                let i = f.clamp(0.0, 1.0) * c;
+                let bx = (px.abs() - c).max(py.abs() - c);
+                let diagonal = (px.abs() + py.abs() - (2.0 * c - i)) / std::f64::consts::SQRT_2;
+                bx.max(diagonal)
+            }
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Mask::Disc => "Disc",
+            Mask::Rounded(_) => "Rounded",
+            Mask::Chamfer(_) => "Chamfer",
+        }
+    }
+}
+
+/// What the mask is sized and centred on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MaskFit {
+    /// Inscribed in the canvas.
+    Canvas,
+    /// Inscribed in the square bounding what is drawn at that point: a disc
+    /// over an inset logo becomes a disc of the logo.
+    Artwork,
+}
+
+/// The square a mask is inscribed in: centre and side, in canvas pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MaskRegion {
+    pub(crate) cx: f64,
+    pub(crate) cy: f64,
+    pub(crate) side: f64,
+}
+
+impl MaskRegion {
+    pub(crate) fn canvas(size: i32) -> MaskRegion {
+        let s = size as f64;
+        MaskRegion { cx: s / 2.0, cy: s / 2.0, side: s }
+    }
+}
+
+/// Alpha at or below this counts as nothing drawn, so an antialiased edge or a
+/// faint glow does not stretch "the artwork" to the whole canvas.
+pub(crate) const DRAWN_ALPHA_FLOOR: u8 = 8;
+
+/// The square bounding what is drawn, centred on it; its side is the larger
+/// dimension, so the mask reaches the artwork's widest extent. None when
+/// nothing is drawn. An image without alpha is drawn everywhere.
+pub(crate) fn drawn_region(pb: &gdk_pixbuf::Pixbuf) -> Option<MaskRegion> {
+    let (w, h) = (pb.width(), pb.height());
+    if !pb.has_alpha() {
+        return Some(MaskRegion { cx: w as f64 / 2.0, cy: h as f64 / 2.0, side: w.max(h) as f64 });
+    }
+    let (n, rs) = (pb.n_channels() as usize, pb.rowstride() as usize);
+    let px = unsafe { pb.pixels() };
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, -1, -1);
+    for y in 0..h {
+        for x in 0..w {
+            if px[y as usize * rs + x as usize * n + 3] > DRAWN_ALPHA_FLOOR {
+                x0 = x0.min(x);
+                x1 = x1.max(x);
+                y0 = y0.min(y);
+                y1 = y1.max(y);
+            }
+        }
+    }
+    if x1 < x0 || y1 < y0 {
+        return None;
+    }
+    let (bw, bh) = ((x1 - x0 + 1) as f64, (y1 - y0 + 1) as f64);
+    Some(MaskRegion { cx: x0 as f64 + bw / 2.0, cy: y0 as f64 + bh / 2.0, side: bw.max(bh) })
+}
+
+/// Mask `src` to a shape inscribed in `region` (the whole square by default),
+/// filling outside it per `fill`.
 ///
 /// The source is scaled to COVER the square (never letterboxed — a disc with
 /// bars through it is not a disc), and the rim is antialiased over one pixel so
-/// the edge does not read as a staircase.
-pub(crate) fn disc_template(src: &gdk_pixbuf::Pixbuf, fill: OuterFill) -> Result<gdk_pixbuf::Pixbuf> {
+/// the edge does not read as a staircase. Every shape goes through here; the
+/// disc's output is unchanged from the old disc-only routine.
+pub(crate) fn apply_mask(
+    src: &gdk_pixbuf::Pixbuf,
+    mask: Mask,
+    fill: OuterFill,
+    region: Option<MaskRegion>,
+) -> Result<gdk_pixbuf::Pixbuf> {
     let (sw, sh) = (src.width(), src.height());
     if sw == 0 || sh == 0 {
         anyhow::bail!("empty image");
@@ -320,27 +432,28 @@ pub(crate) fn disc_template(src: &gdk_pixbuf::Pixbuf, fill: OuterFill) -> Result
     let drow = dst.rowstride() as usize;
     let dbytes = unsafe { dst.pixels() };
 
-    let cx = size as f64 / 2.0;
-    let cy = size as f64 / 2.0;
-    let radius = size as f64 / 2.0;
+    let fsize = size as f64;
+    let (cx, cy) = (fsize / 2.0, fsize / 2.0);
     // Cover: the smaller source axis must reach across the square.
-    let scale = size as f64 / sw.min(sh) as f64;
-    // Gradient normalisation: distance to the furthest PIXEL CENTRE, not to the
-    // abstract corner. A pixel's centre is half a pixel inside the corner, so
-    // normalising to the corner leaves the corner pixel short of the outer stop
-    // (94.7% on a 64px canvas — ask for black->white and the corner comes out
-    // #F1F1F1). The furthest thing that actually gets drawn should reach the
-    // end of the ramp.
-    let corner = ((cx - 0.5).powi(2) + (cy - 0.5).powi(2)).sqrt();
+    let scale = fsize / sw.min(sh) as f64;
+    let r = region.unwrap_or(MaskRegion::canvas(size));
+    // The shape in its own frame: "inscribed in a square of side r.side".
+    let sd = |x: f64, y: f64| mask.signed_distance(x - r.cx + r.side / 2.0, y - r.cy + r.side / 2.0, r.side);
+    // Gradient normalisation: the furthest PIXEL CENTRE, not the abstract
+    // corner (a corner pixel's centre is half a pixel in, so normalising to
+    // the corner leaves it short of the outer stop: #F1F1F1 for black→white
+    // on 64 px). With an off-centre region the corners differ: take the most.
+    let sd_max = [(0.5, 0.5), (fsize - 0.5, 0.5), (0.5, fsize - 0.5), (fsize - 0.5, fsize - 0.5)]
+        .into_iter()
+        .map(|(x, y)| sd(x, y))
+        .fold(f64::MIN, f64::max)
+        .max(1e-9);
 
     for y in 0..size {
         for x in 0..size {
-            let dx = x as f64 + 0.5 - cx;
-            let dy = y as f64 + 0.5 - cy;
-            let dist = (dx * dx + dy * dy).sqrt();
-
+            let d = sd(x as f64 + 0.5, y as f64 + 0.5);
             // Coverage: 1 inside, 0 outside, ramped across the last pixel.
-            let cov = ((radius - dist) + 0.5).clamp(0.0, 1.0);
+            let cov = (0.5 - d).clamp(0.0, 1.0);
 
             // Source pixel under this destination pixel (cover-scaled, centred).
             let sx = ((x as f64 - cx) / scale + sw as f64 / 2.0).floor() as i32;
@@ -352,32 +465,22 @@ pub(crate) fn disc_template(src: &gdk_pixbuf::Pixbuf, fill: OuterFill) -> Result
                 OuterFill::White => (255, 255, 255, 255),
                 OuterFill::Solid(c) => (c.r, c.g, c.b, 255),
                 OuterFill::Gradient { inner, outer } => {
-                    let t = ((dist - radius) / (corner - radius)).clamp(0.0, 1.0);
-                    (
-                        lerp(inner.r, outer.r, t),
-                        lerp(inner.g, outer.g, t),
-                        lerp(inner.b, outer.b, t),
-                        255,
-                    )
+                    let t = (d / sd_max).clamp(0.0, 1.0);
+                    (lerp(inner.r, outer.r, t), lerp(inner.g, outer.g, t), lerp(inner.b, outer.b, t), 255)
                 }
             };
 
-            // Composite the disc over the corner fill by coverage.
+            // Composite the masked artwork over the outer fill by coverage.
             let i = y as usize * drow + x as usize * 4;
             let a_in = ia as f64 / 255.0 * cov;
             let a_out = oa as f64 / 255.0 * (1.0 - cov);
             let a = a_in + a_out;
             if a <= 0.0 {
-                dbytes[i] = 0;
-                dbytes[i + 1] = 0;
-                dbytes[i + 2] = 0;
-                dbytes[i + 3] = 0;
+                dbytes[i..i + 4].copy_from_slice(&[0, 0, 0, 0]);
                 continue;
             }
             let mix = |inside: u8, outside: u8| -> u8 {
-                (((inside as f64 * a_in) + (outside as f64 * a_out)) / a)
-                    .round()
-                    .clamp(0.0, 255.0) as u8
+                (((inside as f64 * a_in) + (outside as f64 * a_out)) / a).round().clamp(0.0, 255.0) as u8
             };
             dbytes[i] = mix(ir, or_);
             dbytes[i + 1] = mix(ig, og);
@@ -386,6 +489,12 @@ pub(crate) fn disc_template(src: &gdk_pixbuf::Pixbuf, fill: OuterFill) -> Result
         }
     }
     Ok(dst)
+}
+
+/// The disc, by its old name: Batch and the disc tests use it, and if the
+/// generalisation changed the disc by a pixel those tests say so.
+pub(crate) fn disc_template(src: &gdk_pixbuf::Pixbuf, fill: OuterFill) -> Result<gdk_pixbuf::Pixbuf> {
+    apply_mask(src, Mask::Disc, fill, None)
 }
 
 /// Alpha below this is treated as "not really there" — a transparent corner is
@@ -464,6 +573,63 @@ mod disc_tests {
     }
 
     use super::*;
+
+    fn bytes(pb: &gdk_pixbuf::Pixbuf) -> Vec<u8> {
+        unsafe { pb.pixels() }.to_vec()
+    }
+
+    #[test]
+    fn rounded_at_full_is_the_disc_and_at_zero_the_whole_square() {
+        let src = red(64);
+        let disc = apply_mask(&src, Mask::Disc, OuterFill::Alpha, None).unwrap();
+        let round = apply_mask(&src, Mask::Rounded(1.0), OuterFill::Alpha, None).unwrap();
+        assert_eq!(bytes(&disc), bytes(&round), "the slider runs continuously from square to circle");
+        let square = apply_mask(&src, Mask::Rounded(0.0), OuterFill::Alpha, None).unwrap();
+        assert_eq!(px(&square, 0, 0), (255, 0, 0, 255), "no rounding: the corner pixel stays");
+        assert_eq!(px(&disc, 0, 0).3, 0, "the disc drops it");
+    }
+
+    #[test]
+    fn a_chamfer_cuts_the_corners_and_keeps_the_edges() {
+        let m = apply_mask(&red(64), Mask::Chamfer(0.5), OuterFill::White, None).unwrap();
+        assert_eq!(px(&m, 0, 0), (255, 255, 255, 255), "the corner is cut, filled white");
+        assert_eq!(px(&m, 32, 0), (255, 0, 0, 255), "the middle of an edge is kept");
+        assert_eq!(px(&m, 32, 32), (255, 0, 0, 255));
+        // The cut line: a pixel just inside the 45° cut is red, just outside white.
+        assert_eq!(px(&m, 12, 12), (255, 0, 0, 255));
+        assert_eq!(px(&m, 6, 6), (255, 255, 255, 255));
+    }
+
+    #[test]
+    fn fitted_to_the_artwork_the_mask_follows_what_is_drawn() {
+        // 200 canvas, opaque only in a 100×100 square in the middle.
+        let pb = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, true, 8, 200, 200).unwrap();
+        pb.fill(0x00000000);
+        red(100).copy_area(0, 0, 100, 100, &pb, 50, 50);
+        let r = drawn_region(&pb).unwrap();
+        assert_eq!((r.cx, r.cy, r.side), (100.0, 100.0, 100.0));
+
+        let canvas = apply_mask(&pb, Mask::Disc, OuterFill::Alpha, None).unwrap();
+        let art = apply_mask(&pb, Mask::Disc, OuterFill::Alpha, Some(r)).unwrap();
+        // The artwork's own corner: inside the canvas disc, outside the logo's disc.
+        assert_eq!(px(&canvas, 52, 52).3, 255);
+        assert_eq!(px(&art, 52, 52).3, 0);
+        // The middle of the artwork's top edge is inside both.
+        assert_eq!(px(&art, 100, 51), (255, 0, 0, 255));
+        // Nothing drawn: no region.
+        let empty = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, true, 8, 10, 10).unwrap();
+        empty.fill(0x00000000);
+        assert_eq!(drawn_region(&empty), None);
+    }
+
+    #[test]
+    fn a_gradient_reaches_its_outer_stop_in_the_corner_for_every_shape() {
+        let fill = OuterFill::Gradient { inner: Rgb { r: 0, g: 0, b: 0 }, outer: Rgb { r: 255, g: 255, b: 255 } };
+        for shape in [Mask::Disc, Mask::Rounded(0.5), Mask::Chamfer(0.5)] {
+            let m = apply_mask(&red(64), shape, fill, None).unwrap();
+            assert_eq!(px(&m, 0, 0), (255, 255, 255, 255), "{shape:?}");
+        }
+    }
 
     /// A solid red square, `n`×`n`, fully opaque.
     fn red(n: i32) -> gdk_pixbuf::Pixbuf {
