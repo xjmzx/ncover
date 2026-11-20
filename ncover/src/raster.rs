@@ -61,6 +61,17 @@ impl Placement {
         }
     }
 
+    /// `fit`, shrunk to `k` of its size and still centred: the whole image
+    /// at 75% or 50% of the canvas, with a margin round it for a background.
+    pub(crate) fn fit_at(sw: i32, sh: i32, c: i32, k: f64) -> Placement {
+        let scale = (c as f64 / sw as f64).min(c as f64 / sh as f64) * k;
+        Placement {
+            dx: (c as f64 - sw as f64 * scale) / 2.0,
+            dy: (c as f64 - sh as f64 * scale) / 2.0,
+            scale,
+        }
+    }
+
     /// Rescale a framing from one canvas to another. Changing the output size
     /// must not re-crop what you already framed — the picture stays where you
     /// put it, the square around it just gets bigger.
@@ -439,6 +450,19 @@ pub(crate) fn dominant_colors(pb: &gdk_pixbuf::Pixbuf, want: usize) -> Vec<Rgb> 
 
 #[cfg(test)]
 mod disc_tests {
+
+    #[test]
+    fn fit_at_shrinks_fit_and_keeps_it_centred() {
+        // A 600×600 logo on a 600 canvas: 75% is 450 px with a 75 px margin.
+        let p = Placement::fit_at(600, 600, 600, 0.75);
+        assert_eq!((p.scale, p.dx, p.dy), (0.75, 75.0, 75.0));
+        // A wide 800×400 on 600: Fit is 600×300; at 50% it is 300×150, centred.
+        let p = Placement::fit_at(800, 400, 600, 0.5);
+        assert_eq!((p.w(800), p.h(400)), (300.0, 150.0));
+        assert_eq!((p.dx, p.dy), (150.0, 225.0));
+        assert_eq!(Placement::fit_at(800, 400, 600, 1.0), Placement::fit(800, 400, 600));
+    }
+
     use super::*;
 
     /// A solid red square, `n`×`n`, fully opaque.

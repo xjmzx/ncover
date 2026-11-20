@@ -3063,7 +3063,13 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
     b_centre.set_tooltip_text(Some("Centre without changing the zoom"));
     let b_11 = Button::with_label("1:1");
     b_11.set_tooltip_text(Some("Actual pixels"));
-    for b in [&b_fit, &b_cover, &b_centre, &b_11] {
+    // Fit, smaller: the whole image at 75% or 50% of the canvas, centred,
+    // with a margin round it — then + Background fills the margin.
+    let b_75 = Button::with_label("75%");
+    b_75.set_tooltip_text(Some("Fit at 75%: the whole image, three quarters of the canvas, centred"));
+    let b_50 = Button::with_label("50%");
+    b_50.set_tooltip_text(Some("Fit at 50%: the whole image, half the canvas, centred"));
+    for b in [&b_fit, &b_75, &b_50, &b_cover, &b_centre, &b_11] {
         b.set_sensitive(false);
         ctl.append(b);
     }
@@ -3698,6 +3704,8 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
             let mut p = d.placement();
             match mode {
                 0 => p = Placement::fit(sw, sh, cv),
+                4 => p = Placement::fit_at(sw, sh, cv, 0.75),
+                5 => p = Placement::fit_at(sw, sh, cv, 0.5),
                 1 => p = Placement::cover(sw, sh, cv),
                 2 => {
                     // Centre, keeping the current zoom.
@@ -3716,7 +3724,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
             mutate(d, None);
         })
     };
-    for (b, mode) in [(&b_fit, 0u8), (&b_cover, 1), (&b_centre, 2), (&b_11, 3)] {
+    for (b, mode) in [(&b_fit, 0u8), (&b_75, 4), (&b_50, 5), (&b_cover, 1), (&b_centre, 2), (&b_11, 3)] {
         let reframe = reframe.clone();
         b.connect_clicked(move |_| reframe(mode));
     }
@@ -4272,6 +4280,8 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
         let ctl = ctl.clone();
         let b_grid = b_grid.clone();
         let b_fit = b_fit.clone();
+        let b_75 = b_75.clone();
+        let b_50 = b_50.clone();
         let b_cover = b_cover.clone();
         let b_centre = b_centre.clone();
         let b_11 = b_11.clone();
@@ -4317,7 +4327,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
             sync_history();
             ctl.set_visible(true);
             b_grid.set_sensitive(true);
-            for b in [&b_fit, &b_cover, &b_centre, &b_11] {
+            for b in [&b_fit, &b_75, &b_50, &b_cover, &b_centre, &b_11] {
                 b.set_sensitive(true);
             }
             pal_btn.set_sensitive(true);

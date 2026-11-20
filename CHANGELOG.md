@@ -11,6 +11,13 @@ to diverge. Its version numbers are independent of these.
 
 ## [Unreleased]
 
+### Added
+- **75% and 50%** beside Fit in the editor: the whole image at three
+  quarters or half of the canvas, centred, with a margin round it. Then
+  + Background fills the margin and Overwrite writes it at the canvas size
+  (area-averaged, so a shrunk logo stays crisp). For label art that runs
+  to the edge.
+
 ## [0.5.1] — 2026-11-20
 
 ### Added
