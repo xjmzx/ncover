@@ -11,6 +11,8 @@ to diverge. Its version numbers are independent of these.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-11-20
+
 ### Added
 - **A Label art scope**, a fourth button (a tag) beside folder · list ·
   disc: ndisc's `_labels` folder under the library root, read from
@@ -20,9 +22,6 @@ to diverge. Its version numbers are independent of these.
   Every other walk now skips a folder named `_labels`, reserved for label
   art suite-wide (SUITE.md), so a library-wide Folder run never takes the
   logos for covers.
-
-### Changed
-- **New app icon**, from the 2026-11-20 master.
 
 - **Batch can write into the library, keeping the originals.** A second
   Output, *Into the library*, beside *To a folder*, for Cap, Square and
@@ -49,6 +48,7 @@ to diverge. Its version numbers are independent of these.
   script.
 
 ### Changed
+- **New app icon**, from the 2026-11-20 master.
 - **Batch's column has the macOS sibling's four section titles**: What to
   run it over, Where the results go, The recipe, What it will touch.
 - **Run says why it cannot go, in place.** Run and Dry run grey out, with
@@ -297,7 +297,8 @@ became installable from a release rather than only from source.
   a Preview contact sheet and a dry run. It never writes over the source.
 - Save as PNG, or overwrite the original PNG in place.
 
-[Unreleased]: https://github.com/xjmzx/ncover/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/xjmzx/ncover/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/xjmzx/ncover/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/xjmzx/ncover/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/xjmzx/ncover/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/xjmzx/ncover/releases/tag/v0.2.0
