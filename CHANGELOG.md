@@ -11,6 +11,8 @@ to diverge. Its version numbers are independent of these.
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-11-20
+
 ### Added
 - **Type a colour.** The HEX / RGB / HSL readout under the swatch is now a
   field: type `#FFFFFF`, `#fff`, `rgb(255, 255, 255)`, `255 255 255`,
@@ -308,7 +310,8 @@ became installable from a release rather than only from source.
   a Preview contact sheet and a dry run. It never writes over the source.
 - Save as PNG, or overwrite the original PNG in place.
 
-[Unreleased]: https://github.com/xjmzx/ncover/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/xjmzx/ncover/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/xjmzx/ncover/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/xjmzx/ncover/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/xjmzx/ncover/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/xjmzx/ncover/compare/v0.2.0...v0.3.0
