@@ -19,7 +19,7 @@ never a database.
 
 Built: all four steps. ndisc's export (0.7.6), and in ncover the list
 scope, Square, Pad, the review grid (0.4.0) and the library write-back
-(unreleased). Next: Convert, then the dimension filters.
+(0.6.0), and Convert (unreleased, 2026-11-22). Next: the dimension filters.
 
 ## Label art: the same loop, for label images (noted 2026-11-20)
 
@@ -84,9 +84,14 @@ kinds · actions, tab-separated, `-` = empty). The framing picks the lines
 (`ncover:cap`, `ncover:square`), only the named cover file is taken, and the
 survey counts the lines left out. Still to build:
 
-- **Convert (PNG → JPEG)**, a job of its own for the `ncover:convert` lines.
-  Order when a cover needs several jobs: square, then cap; convert joins
-  whichever run writes last.
+- ~~**Convert (PNG → JPEG)**~~ — **built 2026-11-22**, after the Mac built
+  it first (1.1.0). The framing dropdown's sixth entry, taking the
+  `ncover:convert` lines; quality 92, same pixels, non-PNGs left alone, a
+  transparent PNG refused. Into the library too, which the Mac still
+  refuses: the log's 11th column (Convert lines only) records the removed
+  PNG, and Put back uses it. The Mac follows in the same wave. Order when a
+  cover needs several jobs: square, then cap; convert joins whichever run
+  writes last.
 - **Filters** beside the name filter, for a folder or the manifest scope:
   non-square by more than X%, long side over N px, long side under N px.
   They join the walk's selection, not a separate pass, so the survey line,

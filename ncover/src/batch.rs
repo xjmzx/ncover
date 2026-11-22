@@ -43,6 +43,13 @@ pub(crate) enum Framing {
     /// Square it keeps the file's name and format and writes nothing for an
     /// image that is already square, and it takes the same list lines.
     Pad(PadFill),
+    /// PNG to JPEG at quality 92, not one pixel changed, for ndisc's
+    /// `ncover:convert` lines. A file that is not a PNG is left alone, and a
+    /// PNG with transparent pixels is refused rather than flattened: JPEG has
+    /// no alpha, and a background is the editor's job, or Pad's. The only
+    /// job whose output name is not its source's: `cover.png` becomes
+    /// `cover.jpg` (`convert_name`).
+    Convert,
 }
 
 /// What fills Pad's bars.
@@ -56,10 +63,12 @@ pub(crate) enum PadFill {
 }
 
 impl Framing {
-    /// Cap and Square tidy a file in place: same name, same format, and a
-    /// file they would not change is not written at all.
+    /// The tidying jobs: a file they would not change is not written at
+    /// all, and what they write sits where the source does. Cap, Square and
+    /// Pad keep the name and format too; Convert keeps the name's stem and
+    /// changes the format (`convert_name`).
     pub(crate) fn keeps_file(self) -> bool {
-        matches!(self, Framing::Cap | Framing::Square | Framing::Pad(_))
+        matches!(self, Framing::Cap | Framing::Square | Framing::Pad(_) | Framing::Convert)
     }
 
     /// Square and Pad both make a non-square image square; they differ only
@@ -76,6 +85,7 @@ impl Framing {
             // ndisc marks "not square"; cropping or padding is the
             // operator's choice, so Pad takes the same lines.
             Framing::Square | Framing::Pad(_) => Some("square"),
+            Framing::Convert => Some("convert"),
             Framing::Cover | Framing::Fit => None,
         }
     }
@@ -511,8 +521,8 @@ impl Scope {
     /// record for the nearest folder above it (so a cover in `Disc 2` is
     /// still "Artist — Title"), else its folder under the scope, so a folder
     /// scope's two Ambers read `Autechre/Amber` and `Boards of Canada/Amber`
-    /// rather than both the scope's own name. The macOS sibling's
-    /// `nameForFile`, ported.
+    /// rather than both the scope's own name; and a file in the scope's own
+    /// root by its own file name. The macOS sibling's `nameForFile`, ported.
     pub(crate) fn name_for_file(&self, file: &Path) -> String {
         if let Some(n) = self.file_names.get(file) {
             return n.clone();
@@ -529,7 +539,15 @@ impl Scope {
         }
         match file.parent().and_then(|d| d.strip_prefix(&self.strip).ok()) {
             Some(rel) if !rel.as_os_str().is_empty() => rel.display().to_string(),
-            _ => self.name_of(&self.strip),
+            // In the scope's own root there is no folder under the scope to
+            // name it by, and the scope's name would caption every file
+            // there alike: over `_labels`, seven logos all called `_labels`.
+            // So it is named by itself, as the macOS sibling does.
+            Some(_) => file
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.name_of(&self.strip)),
+            None => self.name_of(&self.strip),
         }
     }
 
@@ -689,7 +707,7 @@ pub(crate) fn has_transparency(pb: &gdk_pixbuf::Pixbuf) -> bool {
 }
 
 /// The same pixels without the alpha channel.
-fn drop_alpha(pb: &gdk_pixbuf::Pixbuf) -> Result<gdk_pixbuf::Pixbuf> {
+pub(crate) fn drop_alpha(pb: &gdk_pixbuf::Pixbuf) -> Result<gdk_pixbuf::Pixbuf> {
     let (w, h) = (pb.width(), pb.height());
     let out = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, false, 8, w, h)
         .ok_or_else(|| anyhow::anyhow!("could not allocate {w}\u{d7}{h}"))?;
@@ -845,6 +863,15 @@ pub(crate) fn batch_render(src: &Path, r: Recipe) -> Result<gdk_pixbuf::Pixbuf> 
             } else {
                 Ok(sq)
             };
+        }
+        Framing::Convert => {
+            if has_transparency(&pb) {
+                anyhow::bail!(
+                    "it has transparent areas and JPEG cannot hold them; give it a background \
+                     (Pad, or the editor) first. Left as it is"
+                );
+            }
+            return Ok(pb.apply_embedded_orientation().unwrap_or(pb));
         }
         Framing::Pad(fill) => {
             let pb = pb.apply_embedded_orientation().unwrap_or(pb);
@@ -1036,6 +1063,9 @@ pub(crate) fn image_dims(path: &Path) -> Option<(i32, i32)> {
 /// same answer `batch_one` acts on. Unreadable headers say yes: the run opens
 /// the file properly and either changes it or fails it with the reason.
 pub(crate) fn would_change(f: &Path, r: Recipe) -> bool {
+    if r.framing == Framing::Convert {
+        return is_png(f);
+    }
     if is_svg(f) {
         return false;
     }
@@ -1068,11 +1098,47 @@ pub(crate) fn change_survey(files: &[PathBuf], r: Recipe, first_n: usize) -> (us
 /// and extension (it writes the same format back), so sources are already
 /// distinct; the other framings write PNG and go through `plan_dests`.
 pub(crate) fn plan_for(rels: &[PathBuf], r: Recipe) -> Vec<std::result::Result<PathBuf, String>> {
+    if r.framing == Framing::Convert {
+        return plan_converts(rels);
+    }
     if r.framing.keeps_file() {
         rels.iter().map(|p| Ok(p.clone())).collect()
     } else {
         plan_dests(rels, r.disc.is_some())
     }
+}
+
+/// Convert's plan. Only the files the run will write claim an output name:
+/// a `cover.jpg` left alone and the `cover.png` beside it would otherwise
+/// both plan `cover.jpg`, and the real work would be refused as a clash with
+/// a file that writes nothing. Two PNGs that still meet (`cover.png` and
+/// `cover.PNG`) are refused, the second one, with the reason.
+pub(crate) fn plan_converts(rels: &[PathBuf]) -> Vec<std::result::Result<PathBuf, String>> {
+    let mut taken: HashMap<PathBuf, &PathBuf> = HashMap::new();
+    rels.iter()
+        .map(|rel| {
+            if !is_png(rel) {
+                return Ok(rel.clone()); // left alone; claims nothing
+            }
+            let dest = convert_name(rel);
+            match taken.get(&dest) {
+                Some(first) => Err(format!(
+                    "would overwrite the conversion of {} ({}); not written",
+                    first.display(),
+                    dest.display()
+                )),
+                None => {
+                    taken.insert(dest.clone(), rel);
+                    Ok(dest)
+                }
+            }
+        })
+        .collect()
+}
+
+/// What Convert writes for `p`: the same path, `.jpg`.
+pub(crate) fn convert_name(p: &Path) -> PathBuf {
+    p.with_extension("jpg")
 }
 
 /// How many plain output names are shared by more than one source: the
@@ -1100,7 +1166,11 @@ pub(crate) fn batch_one(src: &Path, dest: &Path, r: Recipe, dry: bool) -> Result
         if !would_change(src, r) {
             return Ok(None);
         }
-        cap_format(src)?
+        if r.framing == Framing::Convert {
+            ("jpeg", vec![("quality", "92")])
+        } else {
+            cap_format(src)?
+        }
     } else {
         ("png", Vec::new())
     };
@@ -1122,6 +1192,12 @@ pub(crate) fn batch_one(src: &Path, dest: &Path, r: Recipe, dry: bool) -> Result
         .savev(&dest, format.0, &opts)
         .with_context(|| format!("could not write {}", dest.display()))?;
     Ok(Some(dest))
+}
+
+fn is_png(p: &Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("png"))
 }
 
 fn is_svg(p: &Path) -> bool {
@@ -1420,6 +1496,7 @@ pub(crate) fn out_dims(src: (i32, i32), r: Recipe) -> (i32, i32) {
     match r.framing {
         Framing::Cover | Framing::Fit => (r.canvas, r.canvas),
         Framing::Cap => cap_size(w, h, r.canvas).unwrap_or((w, h)),
+        Framing::Convert => (w, h),
         Framing::Square => {
             let s = w.min(h).min(r.canvas);
             (s, s)
@@ -1472,7 +1549,13 @@ mod batch_tests {
         let plain = Scope::folder(lib.clone());
         assert_eq!(plain.name_for_file(Path::new("/lib/Autechre/Amber/cover.jpg")), "Autechre/Amber");
         assert_eq!(plain.name_for_file(Path::new("/lib/Boards of Canada/Amber/cover.jpg")), "Boards of Canada/Amber");
-        assert_eq!(plain.name_for_file(Path::new("/lib/cover.jpg")), "lib", "a file at the root: the folder's own name");
+        assert_eq!(plain.name_for_file(Path::new("/lib/cover.jpg")), "cover.jpg", "a file at the root: its own name");
+        let labels = Scope::folder(lib.join(LABELS_DIR));
+        assert_eq!(
+            labels.name_for_file(&lib.join(LABELS_DIR).join("Peak Oil.png")),
+            "Peak Oil.png",
+            "seven logos in one folder are seven names, not seven `_labels`"
+        );
         let mut named = Scope::folder(lib.clone());
         named.names.insert(lib.join("Autechre/Amber"), "Autechre \u{2014} Amber".into());
         assert_eq!(
@@ -1480,6 +1563,71 @@ mod batch_tests {
             "Autechre \u{2014} Amber",
             "a disc subfolder keeps the release's name"
         );
+    }
+
+    #[test]
+    fn convert_writes_a_jpeg_of_the_same_pixels_and_leaves_the_rest() {
+        let d = tmpdir("convert-folder");
+        let (src, out) = (d.join("src"), d.join("out"));
+        fs::create_dir_all(src.join("A")).unwrap();
+        let png = src.join("A/cover.png");
+        let pb = solid(320, 200, false, 0x204060ff);
+        pb.savev(&png, "png", &[]).unwrap();
+        let jpg = src.join("A/back.jpg");
+        pb.savev(&jpg, "jpeg", &[("quality", "92")]).unwrap();
+        let r = Recipe { canvas: 600, framing: Framing::Convert, disc: None };
+        assert!(would_change(&png, r) && !would_change(&jpg, r));
+        let rels = [PathBuf::from("A/cover.png"), PathBuf::from("A/back.jpg")];
+        let plan = plan_for(&rels, r);
+        assert_eq!(plan[0].as_ref().unwrap(), Path::new("A/cover.jpg"));
+        let dest = out.join(plan[0].as_ref().unwrap());
+        assert_eq!(batch_one(&png, &dest, r, false).unwrap(), Some(dest.clone()));
+        assert_eq!(batch_one(&jpg, &out.join("A/back.jpg"), r, false).unwrap(), None, "a JPEG is left alone");
+        assert_eq!(cap_format(&dest).unwrap().0, "jpeg");
+        assert_eq!(image_dims(&dest), Some((320, 200)));
+        let back = gdk_pixbuf::Pixbuf::from_file(&dest).unwrap();
+        let (r0, g0, b0, _) = px(&back, 100, 100);
+        assert!((r0 as i32 - 0x20).abs() <= 2 && (g0 as i32 - 0x40).abs() <= 2 && (b0 as i32 - 0x60).abs() <= 2);
+    }
+
+    #[test]
+    fn convert_refuses_a_transparent_png_rather_than_flatten_it() {
+        let d = tmpdir("convert-alpha");
+        let png = d.join("logo.png");
+        let pb = solid(64, 64, true, 0xffffffff);
+        set(&pb, 0, 0, [0, 0, 0, 0]);
+        pb.savev(&png, "png", &[]).unwrap();
+        let r = Recipe { canvas: 600, framing: Framing::Convert, disc: None };
+        let e = format!("{:#}", batch_one(&png, &d.join("out/logo.jpg"), r, true).unwrap_err());
+        assert!(e.contains("transparent"), "{e}");
+        // An alpha channel with every pixel opaque converts.
+        let opaque = d.join("opaque.png");
+        solid(64, 64, true, 0xffffffff).savev(&opaque, "png", &[]).unwrap();
+        assert!(batch_one(&opaque, &d.join("out/opaque.jpg"), r, false).unwrap().is_some());
+    }
+
+    #[test]
+    fn only_the_files_convert_writes_claim_a_name() {
+        // cover.jpg is left alone, so it must not block cover.png's
+        // cover.jpg; two PNGs that still meet refuse the second.
+        let rels = [PathBuf::from("A/cover.jpg"), PathBuf::from("A/cover.png"), PathBuf::from("B/x.png"), PathBuf::from("B/x.PNG")];
+        let plan = plan_converts(&rels);
+        assert_eq!(plan[1].as_ref().unwrap(), Path::new("A/cover.jpg"));
+        assert_eq!(plan[2].as_ref().unwrap(), Path::new("B/x.jpg"));
+        assert!(plan[3].as_ref().unwrap_err().contains("would overwrite"));
+    }
+
+    #[test]
+    fn a_list_run_of_convert_takes_the_convert_lines() {
+        let l = parse_cover_list(
+            "/lib/_labels\t/lib/_labels/Peak Oil.png\tPeak Oil\t-\t-\tpng\t-\tncover:convert\n\
+             /lib/_labels\t/lib/_labels/Warp.jpg\tWarp\t-\t-\tjpg\t-\tncover:square\n",
+        );
+        let job = Framing::Convert.job();
+        assert_eq!(job, Some("convert"));
+        let picked: Vec<_> = l.lines.iter().filter(|x| l.selects(x, job)).map(|x| x.name.clone().unwrap()).collect();
+        assert_eq!(picked, ["Peak Oil"]);
+        assert_eq!(l.left_out(job), "1 to square");
     }
 
     #[test]
@@ -2453,7 +2601,7 @@ relative/folder\t-\t-
         let path = PathBuf::from(std::env::var("NCOVER_LIST").expect("set NCOVER_LIST"));
         let l = load_cover_list(&path).unwrap();
         println!("{} lines under {} ({} skipped)", l.lines.len(), l.root.display(), l.skipped.len());
-        for f in [Framing::Square, Framing::Cap] {
+        for f in [Framing::Square, Framing::Cap, Framing::Convert] {
             let r = Recipe { canvas: 600, framing: f, disc: None };
             let scope = Scope::list(&l, f.job());
             let s = survey_batch(&scope, "cover");

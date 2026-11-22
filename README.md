@@ -42,7 +42,7 @@ X11 screen picker and grew into a small artwork tool. Part of the `n.*` suite.
 - **Batch** the same recipe over a folder, a list of release folders (such
   as ndisc's Export list), or an ndisc-published discography, with a live
   grid of every file it would touch and a dry run. It writes to an output
-  folder, or (Cap, Square, Pad) back into the library in place, keeping each
+  folder, or (Cap, Square, Pad, Convert) back into the library in place, keeping each
   original in an originals folder with a log and a **Put back last run**.
   A fourth scope, **Label art**, takes ndisc's `_labels` folder of
   record-label images.
@@ -50,6 +50,8 @@ X11 screen picker and grew into a small artwork tool. Part of the `n.*` suite.
   optional disc); **Cap** shrinks oversized images, **Square** crops
   off-square ones to their centre, and **Pad** fills them out to a square;
   these three keep each file's format and skip files they would not change.
+  **Convert** turns a PNG into a JPEG of the same pixels (`cover.png` →
+  `cover.jpg`), refusing one with transparency and leaving other files alone.
 
 Save PNG… always writes PNG (the disc mask needs alpha); Overwrite keeps the
 original's format.

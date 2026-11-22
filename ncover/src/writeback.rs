@@ -30,12 +30,19 @@ use super::*;
 //   given a made-up place.
 // - **Every swap is logged** in `ncover-log.tsv` in the originals folder,
 //   plain TSV, and the last run can be put back from it.
+// - **Convert removes a file as well as writing one.** `cover.png` becomes
+//   `cover.jpg`, so its swap line carries an 11th column: the library file
+//   it removed. Only Convert's lines have it (decided with the macOS sibling,
+//   2026-11-22): the other jobs' lines stay at ten, readable by any version,
+//   and a reader that predates the column skips an 11-column line rather
+//   than putting a PNG's bytes back under the JPEG's name. Put back reads it
+//   as the place the original returns to, and removes the JPEG.
 
 /// The log, in the root of the originals folder.
 pub(crate) const WRITEBACK_LOG: &str = "ncover-log.tsv";
 
 const LOG_HEAD: &str = "# n.cover write-back log. One `swap` line per replaced file, one `undo` line per run put back.\n\
-# swap\trun\ttime\tjob\tlibrary file\toriginal kept\tbefore\tafter\twritten bytes\twritten mtime (ns)\n\
+# swap\trun\ttime\tjob\tlibrary file\toriginal kept\tbefore\tafter\twritten bytes\twritten mtime (ns)\t[library file removed: convert only]\n\
 # undo\trun\ttime\trestored\tskipped\n";
 
 /// The originals folder may not be the library, inside it, or above it.
@@ -78,6 +85,7 @@ fn job_word(f: Framing) -> Option<&'static str> {
         Framing::Cap => Some("cap"),
         Framing::Square => Some("square"),
         Framing::Pad(_) => Some("pad"),
+        Framing::Convert => Some("convert"),
         _ => None,
     }
 }
@@ -165,13 +173,17 @@ impl WriteBack {
     /// be), with the original at `kept`.
     pub(crate) fn one(&self, src: &Path, rel: &Path, r: Recipe, dry: bool) -> Result<Option<PathBuf>> {
         let Some(job) = job_word(r.framing) else {
-            anyhow::bail!("only Cap, Square and Pad write into the library: Cover and Fit write a PNG under another name");
+            anyhow::bail!("only Cap, Square, Pad and Convert write into the library: Cover and Fit write a PNG under another name");
         };
         let kept = self.kept_root.join(rel);
         if !kept.starts_with(&self.kept_root) || rel.is_absolute() {
             anyhow::bail!("{} would land outside the originals folder", rel.display());
         }
-        for p in [src, kept.as_path()] {
+        // Where the result goes: the source itself, or for Convert the same
+        // path as `.jpg`, with the source then removed.
+        let convert = r.framing == Framing::Convert;
+        let lib = if convert { convert_name(src) } else { src.to_path_buf() };
+        for p in [src, kept.as_path(), lib.as_path()] {
             if p.to_string_lossy().contains(['\t', '\n']) {
                 anyhow::bail!("its path holds a tab or a line break, which the log cannot record");
             }
@@ -185,9 +197,15 @@ impl WriteBack {
                 kept.display()
             );
         }
+        if convert && lib.symlink_metadata().is_ok() {
+            anyhow::bail!(
+                "the library already has {} beside it; converting would write over it. Left as it is",
+                lib.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+            );
+        }
         cap_format(src)?;
         let pb = batch_render(src, r)?;
-        refuse_alpha_for(&pb, src)?;
+        refuse_alpha_for(&pb, &lib)?;
         if dry {
             return Ok(Some(kept));
         }
@@ -200,19 +218,34 @@ impl WriteBack {
                 prune_empty(p.to_path_buf(), &self.kept_root);
             }
         };
-        if let Err(e) = overwrite_in_place(&pb, src) {
+        if convert {
+            // A new file beside the source, its permissions the source's.
+            // Only once it is whole is the source removed; if that fails the
+            // JPEG goes again, so the library is as it was.
+            let written = write_new(&pb, &lib, src).and_then(|()| {
+                fs::remove_file(src).map_err(|e| {
+                    let _ = fs::remove_file(&lib);
+                    anyhow::Error::msg(format!("could not remove {}: {e}", src.display()))
+                })
+            });
+            if let Err(e) = written {
+                forget_kept();
+                return Err(e.context(format!("could not convert {}", src.display())));
+            }
+        } else if let Err(e) = overwrite_in_place(&pb, src) {
             // The library still holds the original (the rename never
             // happened), so the copy is not needed and must not block the
             // slot for a later run.
             forget_kept();
             return Err(e.context(format!("could not write {}", src.display())));
         }
-        let meta = fs::metadata(src)?;
+        let meta = fs::metadata(&lib)?;
+        let removed = if convert { format!("\t{}", src.display()) } else { String::new() };
         let line = format!(
-            "swap\t{}\t{}\t{job}\t{}\t{}\t{}x{}\t{}x{}\t{}\t{}\n",
+            "swap\t{}\t{}\t{job}\t{}\t{}\t{}x{}\t{}x{}\t{}\t{}{removed}\n",
             self.run,
             self.time,
-            src.display(),
+            lib.display(),
             kept.display(),
             before.0,
             before.1,
@@ -224,7 +257,13 @@ impl WriteBack {
         if let Err(e) = append_log(&self.kept_root, &line) {
             // A swap the log does not know about cannot be undone, so it is
             // not left in place: the original goes straight back.
-            let back = restore(&kept, src);
+            let back = restore(&kept, src).and_then(|()| {
+                if convert {
+                    fs::remove_file(&lib).map_err(|e| anyhow::Error::msg(format!("could not remove {}: {e}", lib.display())))
+                } else {
+                    Ok(())
+                }
+            });
             if back.is_ok() {
                 forget_kept();
             }
@@ -235,6 +274,34 @@ impl WriteBack {
         }
         Ok(Some(kept))
     }
+}
+
+/// Write `pb` as a JPEG at `to`, a path that does not exist yet: a temp name
+/// beside it, then renamed into place, with `like`'s permissions.
+fn write_new(pb: &gdk_pixbuf::Pixbuf, to: &Path, like: &Path) -> Result<()> {
+    let rgb;
+    let pb = if pb.has_alpha() {
+        rgb = drop_alpha(pb)?;
+        &rgb
+    } else {
+        pb
+    };
+    let tmp = tmp_beside(to);
+    if let Err(e) = pb.savev(&tmp, "jpeg", &[("quality", "92")]) {
+        let _ = fs::remove_file(&tmp);
+        return Err(anyhow::Error::msg(e.to_string()));
+    }
+    if let Ok(m) = fs::metadata(like) {
+        let _ = fs::set_permissions(&tmp, m.permissions());
+    }
+    if to.symlink_metadata().is_ok() {
+        let _ = fs::remove_file(&tmp);
+        anyhow::bail!("{} appeared while converting; left as it is", to.display());
+    }
+    fs::rename(&tmp, to).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        anyhow::Error::msg(e.to_string())
+    })
 }
 
 fn append_log(root: &Path, line: &str) -> Result<()> {
@@ -279,6 +346,9 @@ pub(crate) struct LogRow {
     kept: PathBuf,
     bytes: u64,
     mtime: u128,
+    /// Convert's 11th column: the library file the swap removed, which is
+    /// where its original goes back to.
+    removed: Option<PathBuf>,
 }
 
 fn read_log(root: &Path) -> Result<Vec<LogRow>> {
@@ -292,7 +362,7 @@ fn read_log(root: &Path) -> Result<Vec<LogRow>> {
     for line in text.lines() {
         let f: Vec<&str> = line.split('\t').collect();
         match f.as_slice() {
-            ["swap", run, time, _job, lib, kept, _b, _a, bytes, mtime] => rows.push(LogRow {
+            ["swap", run, time, _job, lib, kept, _b, _a, bytes, mtime, rest @ ..] if rest.len() <= 1 => rows.push(LogRow {
                 undo: false,
                 run: run.to_string(),
                 time: time.to_string(),
@@ -300,6 +370,7 @@ fn read_log(root: &Path) -> Result<Vec<LogRow>> {
                 kept: PathBuf::from(kept),
                 bytes: bytes.parse().unwrap_or(u64::MAX),
                 mtime: mtime.parse().unwrap_or(0),
+                removed: rest.first().map(PathBuf::from),
             }),
             ["undo", run, time, ..] => rows.push(LogRow {
                 undo: true,
@@ -309,6 +380,7 @@ fn read_log(root: &Path) -> Result<Vec<LogRow>> {
                 kept: PathBuf::new(),
                 bytes: 0,
                 mtime: 0,
+                removed: None,
             }),
             _ => {} // the header, or a line a person added
         }
@@ -360,8 +432,22 @@ pub(crate) fn undo_last(root: &Path) -> Result<Option<UndoReport>> {
             report.skipped.push((r.lib.clone(), format!("its original is no longer at {}", r.kept.display())));
             continue;
         }
-        match restore(&r.kept, &r.lib) {
+        // Convert's original goes back to the name it had, which must still
+        // be free; then the JPEG it became is removed.
+        let back_to = r.removed.as_ref().unwrap_or(&r.lib);
+        if r.removed.is_some() && back_to.symlink_metadata().is_ok() {
+            report.skipped.push((r.lib.clone(), format!("{} is in the library again; left as it is", back_to.display())));
+            continue;
+        }
+        match restore(&r.kept, back_to) {
             Ok(()) => {
+                if r.removed.is_some() {
+                    if let Err(e) = fs::remove_file(&r.lib) {
+                        // The original is back; the JPEG beside it stays, and
+                        // is named, rather than the original leaving again.
+                        report.skipped.push((r.lib.clone(), format!("its original is back, but this could not be removed ({e})")));
+                    }
+                }
                 let _ = fs::remove_file(&r.kept);
                 if let Some(p) = r.kept.parent() {
                     prune_empty(p.to_path_buf(), root);
@@ -400,6 +486,98 @@ mod writeback_tests {
 
     fn square() -> Recipe {
         Recipe { canvas: 600, framing: Framing::Square, disc: None }
+    }
+
+    fn png(p: &Path, w: i32, h: i32, alpha: bool, rgba: u32) {
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        let pb = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, alpha, 8, w, h).unwrap();
+        pb.fill(rgba);
+        pb.savev(p, "png", &[]).unwrap();
+    }
+
+    fn convert() -> Recipe {
+        Recipe { canvas: 600, framing: Framing::Convert, disc: None }
+    }
+
+    #[test]
+    fn convert_into_the_library_keeps_the_png_logs_eleven_columns_and_puts_back() {
+        let base = tmpdir("convert");
+        let (lib, kept) = (base.join("library"), base.join("originals"));
+        let logo = lib.join("_labels/Peak Oil.png");
+        png(&logo, 500, 300, false, 0x336699ff);
+        let before = fs::read(&logo).unwrap();
+
+        let wb = WriteBack::start(&kept).unwrap();
+        let rel = rel_under(&logo, &lib).unwrap();
+        assert!(wb.one(&logo, &rel, convert(), true).unwrap().is_some(), "a dry run says it would");
+        assert!(logo.is_file() && !lib.join("_labels/Peak Oil.jpg").exists(), "and writes nothing");
+
+        let got = wb.one(&logo, &rel, convert(), false).unwrap();
+        let k = kept.join("_labels/Peak Oil.png");
+        let jpg = lib.join("_labels/Peak Oil.jpg");
+        assert_eq!(got.as_deref(), Some(k.as_path()));
+        assert!(!logo.exists(), "the PNG has left the library");
+        assert_eq!(fs::read(&k).unwrap(), before, "and is kept byte for byte, under its own name");
+        assert_eq!(image_dims(&jpg), Some((500, 300)), "the JPEG is the same size");
+        assert_eq!(cap_format(&jpg).unwrap().0, "jpeg");
+
+        let log = fs::read_to_string(kept.join(WRITEBACK_LOG)).unwrap();
+        let line = log.lines().find(|l| l.starts_with("swap\t")).unwrap();
+        let f: Vec<&str> = line.split('\t').collect();
+        assert_eq!(f.len(), 11, "Convert's swap line carries the removed file");
+        assert_eq!((f[3], f[4], f[5], f[10]), ("convert", jpg.to_str().unwrap(), k.to_str().unwrap(), logo.to_str().unwrap()));
+
+        let rep = undo_last(&kept).unwrap().unwrap();
+        assert_eq!((rep.restored, rep.skipped.len()), (1, 0));
+        assert_eq!(fs::read(&logo).unwrap(), before, "Put back returns the PNG to its own name");
+        assert!(!jpg.exists(), "and removes the JPEG it became");
+        assert!(!kept.join("_labels").exists(), "the kept copy and its folder are gone");
+        assert_eq!(last_run(&kept).unwrap(), None);
+    }
+
+    #[test]
+    fn convert_refuses_a_jpeg_already_beside_it_and_a_transparent_png() {
+        let base = tmpdir("convert-refused");
+        let (lib, kept) = (base.join("library"), base.join("originals"));
+        let a = lib.join("A/cover.png");
+        png(&a, 400, 400, false, 0xff0000ff);
+        jpeg(&lib.join("A/cover.jpg"), 400, 400, 0x00ff00ff);
+        let b = lib.join("B/cover.png");
+        png(&b, 400, 400, true, 0xff000080);
+        let wb = WriteBack::start(&kept).unwrap();
+        for (f, why) in [(&a, "already has cover.jpg"), (&b, "transparent")] {
+            let rel = rel_under(f, &lib).unwrap();
+            for dry in [true, false] {
+                let e = format!("{:#}", wb.one(f, &rel, convert(), dry).unwrap_err());
+                assert!(e.contains(why), "{e}");
+            }
+            assert!(f.is_file());
+        }
+        assert_eq!(image_dims(&lib.join("A/cover.jpg")), Some((400, 400)));
+        assert!(!lib.join("B/cover.jpg").exists());
+        assert!(!kept.join("A").exists() && !kept.join("B").exists(), "nothing kept for a refusal");
+    }
+
+    #[test]
+    fn convert_leaves_a_jpeg_alone_and_a_ten_column_line_still_reads() {
+        let base = tmpdir("convert-mixed");
+        let (lib, kept) = (base.join("library"), base.join("originals"));
+        let j = lib.join("A/cover.jpg");
+        jpeg(&j, 700, 600, 0x0000ffff);
+        let wb = WriteBack::start(&kept).unwrap();
+        assert_eq!(wb.one(&j, &rel_under(&j, &lib).unwrap(), convert(), false).unwrap(), None);
+        // A Square swap and a Convert swap in one log: one ten columns, one
+        // eleven, both read, both put back.
+        assert!(wb.one(&j, &rel_under(&j, &lib).unwrap(), square(), false).unwrap().is_some());
+        let p = lib.join("B/cover.png");
+        png(&p, 300, 300, false, 0x123456ff);
+        assert!(wb.one(&p, &rel_under(&p, &lib).unwrap(), convert(), false).unwrap().is_some());
+        let rows = read_log(&kept).unwrap();
+        assert_eq!(rows.iter().map(|r| r.removed.is_some()).collect::<Vec<_>>(), [false, true]);
+        let rep = undo_last(&kept).unwrap().unwrap();
+        assert_eq!((rep.restored, rep.skipped.len()), (2, 0));
+        assert_eq!(image_dims(&j), Some((700, 600)));
+        assert!(p.is_file() && !lib.join("B/cover.jpg").exists());
     }
 
     #[test]

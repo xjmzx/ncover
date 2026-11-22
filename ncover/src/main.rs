@@ -1051,7 +1051,7 @@ fn build_batch(
     t_folder.set_tooltip_text(Some("Write the results into an output folder, mirroring the source. The library is not touched."));
     let t_lib = ToggleButton::with_label("Into the library");
     t_lib.set_tooltip_text(Some(
-        "Cap, Square and Pad only. Each cover is replaced where it is, in its own name and format, and its original is copied first to the same place under an originals folder. Every swap is logged there, and Put back last run restores them. Cover and Fit write a PNG under another name, so they cannot.",
+        "Cap, Square, Pad and Convert only. Each cover is replaced where it is, in its own name and format (Convert: cover.png becomes cover.jpg, so rescan in ndisc after), and its original is copied first to the same place under an originals folder. Every swap is logged there, and Put back last run restores them. Cover and Fit write a PNG under another name, so they cannot.",
     ));
     t_lib.set_group(Some(&t_folder));
     t_folder.set_active(true);
@@ -1088,9 +1088,9 @@ fn build_batch(
     ));
     row_r.append(&e_match);
 
-    let dd_frame = gtk::DropDown::from_strings(&["Cover", "Fit", "Cap", "Square", "Pad"]);
+    let dd_frame = gtk::DropDown::from_strings(&["Cover", "Fit", "Cap", "Square", "Pad", "Convert"]);
     dd_frame.set_tooltip_text(Some(
-        "Cover fills the square (edges cropped); Fit puts the whole image inside it. Both write a square PNG at the size.\n\nCap shrinks only images larger than the size, keeping their shape and format (JPEG stays JPEG), and leaves the rest alone. Use it to tidy a library's covers.\n\nSquare crops only images that are not square, to a square of their shorter side taken from the centre, then shrinks any larger than the size. It keeps the format and leaves square images alone. Meant for a chosen few, from a list.\n\nPad squares without cropping: the image sits in the middle of a square of its longer side, and the bars are filled (the edge colour, white, black or your picked colour). Then as Square: shrunk if larger than the size, format kept, square images left alone, the same list lines.\n\nA dragged placement is about ONE image's dimensions, so it is not offered here.",
+        "Cover fills the square (edges cropped); Fit puts the whole image inside it. Both write a square PNG at the size.\n\nCap shrinks only images larger than the size, keeping their shape and format (JPEG stays JPEG), and leaves the rest alone. Use it to tidy a library's covers.\n\nSquare crops only images that are not square, to a square of their shorter side taken from the centre, then shrinks any larger than the size. It keeps the format and leaves square images alone. Meant for a chosen few, from a list.\n\nPad squares without cropping: the image sits in the middle of a square of its longer side, and the bars are filled (the edge colour, white, black or your picked colour). Then as Square: shrunk if larger than the size, format kept, square images left alone, the same list lines.\n\nConvert turns a PNG into a JPEG (quality 92) of the same pixels, cover.png into cover.jpg, and leaves every other file alone. A PNG with transparent areas is refused: JPEG has no room for them. From a list it takes ndisc's ncover:convert lines.\n\nA dragged placement is about ONE image's dimensions, so it is not offered here.",
     ));
     row_r.append(&dd_frame);
 
@@ -1115,7 +1115,8 @@ fn build_batch(
         move |dd| {
             let pad = dd.selected() == 4;
             dd_pad.set_visible(pad);
-            dd_disc.set_visible(!pad);
+            // Neither Pad nor Convert has room for a disc.
+            dd_disc.set_visible(!pad && dd.selected() != 5);
         }
     ));
 
@@ -1828,6 +1829,10 @@ fn build_batch(
                 // does not apply.
                 return Ok(Recipe { canvas: canvas.get(), framing: Framing::Pad(fill), disc: None });
             }
+            if framing == Framing::Convert {
+                // The disc dropdown is hidden under Convert, as under Pad.
+                return Ok(Recipe { canvas: canvas.get(), framing, disc: None });
+            }
             if framing == Framing::Cap && disc.is_some() {
                 return Err("Cap keeps each image's own shape, and a disc needs a square. Choose No disc to cap.".into());
             }
@@ -1861,6 +1866,8 @@ fn build_batch(
             let needle = e_match.text().to_string();
             let left_why = if recipe.framing.squares() {
                 "already square"
+            } else if recipe.framing == Framing::Convert {
+                "not a PNG"
             } else {
                 "already within the cap"
             };
@@ -2126,7 +2133,7 @@ fn build_batch(
             }
             let Some(recipe) = resolve_recipe() else { return };
             if lib && !recipe.framing.keeps_file() {
-                show_error(&window, "Only Cap, Square and Pad write into the library. Cover and Fit write a PNG under another name, which would leave ndisc pointing at the old file.");
+                show_error(&window, "Only Cap, Square, Pad and Convert write into the library. Cover and Fit write a PNG under another name, which would leave ndisc pointing at the old file.");
                 return;
             }
             if !lib || dry {
@@ -2144,11 +2151,21 @@ fn build_batch(
                 .modal(true)
                 .message(format!("Replace {n} covers in the library?"))
                 .detail(format!(
-                    "Each cover under {} is replaced where it is, in its own name and format. \
-                     Its original is copied first to the same place under {}, and every swap is \
+                    "{} Its original is copied first to the same place under {}, and every swap is \
                      logged there in {WRITEBACK_LOG}. A cover whose original is already kept is \
                      refused. Put back last run restores them.",
-                    scope.guard_root.display(),
+                    if recipe.framing == Framing::Convert {
+                        format!(
+                            "Each PNG under {} becomes a JPEG of the same pixels beside it, and the PNG is \
+                             removed: cover.png becomes cover.jpg, so rescan the library in ndisc after.",
+                            scope.guard_root.display()
+                        )
+                    } else {
+                        format!(
+                            "Each cover under {} is replaced where it is, in its own name and format.",
+                            scope.guard_root.display()
+                        )
+                    },
                     root.display()
                 ))
                 .buttons(["Cancel", "Replace"])
@@ -2403,7 +2420,7 @@ fn build_batch(
             match recipe_now() {
                 Err(e) => Some(e),
                 Ok(r) if lib && !r.framing.keeps_file() => {
-                    Some("Only Cap, Square and Pad write into the library.".into())
+                    Some("Only Cap, Square, Pad and Convert write into the library.".into())
                 }
                 Ok(_) => None,
             }
@@ -2583,6 +2600,16 @@ fn build_batch(
                         ),
                         format!("Run ({n} of {total} to pad)"),
                     ),
+                    Framing::Convert if n == 0 => (
+                        format!("None of the {total} is a PNG. Convert would write nothing."),
+                        format!("Run (0 of {total} to convert)"),
+                    ),
+                    Framing::Convert => (
+                        format!(
+                            "{n} of {total} are PNGs and would become JPEGs of the same pixels, the largest first \u{b7} {rest} not PNG, left alone"
+                        ),
+                        format!("Run ({n} of {total} to convert)"),
+                    ),
                     Framing::Cap if n == 0 => (
                         format!("All {total} are already within {c} px. Cap would write nothing."),
                         format!("Run (0 of {total} to shrink)"),
@@ -2631,6 +2658,7 @@ fn framing_at(i: u32) -> Framing {
         3 => Framing::Square,
         // The fill is chosen beside it; `recipe_now` puts it in.
         4 => Framing::Pad(PadFill::Edge),
+        5 => Framing::Convert,
         _ => Framing::Cover,
     }
 }
@@ -2740,6 +2768,7 @@ impl GridItem {
         let words = match p.dims {
             None => "size unreadable".to_string(),
             Some(d) if matches!(r.framing, Framing::Pad(_)) => pad_words(d, out_dims(d, r)),
+            Some((w, h)) if r.framing == Framing::Convert => format!("{w} \u{d7} {h} \u{b7} PNG \u{2192} JPEG"),
             Some(d) if r.framing.keeps_file() => change_words(d, out_dims(d, r)),
             Some((w, h)) => {
                 let (ow, oh) = out_dims((w, h), r);

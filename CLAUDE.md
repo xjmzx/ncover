@@ -131,7 +131,9 @@ porting further features across.
   also be the "running" flag.
 - **A file's name in the grid and Files list is `Scope::name_for_file`**:
   the record for the nearest folder above it, else its folder under the
-  scope. The macOS `nameForFile`, ported; keep the two answering alike.
+  scope, else (a file in the scope's own root) its own file name, so seven
+  logos in `_labels` are seven names. The macOS `nameForFile`, ported; keep
+  the two answering alike.
 - **A list's named files are kept per line, its roots per folder**
   (`Scope::only: folder → Vec<file>`, `file_names` per file). Label art is
   many labels in one folder, so a map of one file per folder ran a whole
@@ -228,7 +230,7 @@ porting further features across.
   off Linux.
 - **Three writing modes with different safety.**
   - *Batch to a folder* never writes into its source (`guard_batch`).
-  - *Batch into the library* (`writeback.rs`, Cap / Square / Pad only)
+  - *Batch into the library* (`writeback.rs`, Cap / Square / Pad / Convert)
     **never writes over its source without keeping the original.** Per file:
     the original is copied whole into the originals folder at the same
     relative path (temp name, synced, length checked, renamed into its slot),
@@ -241,6 +243,16 @@ porting further features across.
     run not yet undone, skipping any library file whose size or mtime is not
     what the run wrote. Cover and Fit are refused: they write a PNG under
     another name, which would orphan ndisc's `cover_art_path`.
+    **Convert is the one job that changes a name** (`cover.png` →
+    `cover.jpg`): it writes the JPEG beside the PNG, removes the PNG, and its
+    `swap` line carries an **11th column, the library file removed**. Only
+    Convert's lines have it (agreed with the Mac, 2026-11-22), so Cap /
+    Square / Pad lines stay ten columns, and a reader that predates the
+    column skips a Convert line rather than putting PNG bytes back under the
+    JPEG's name. Put back returns the original to that name and removes the
+    JPEG. Both apps' readers match ten fields exactly, so **any change to the
+    log format is a two-app wave**: the Mac's `WriteBack.swift` reads the
+    same file.
   - *Overwrite* (Edit) replaces the original PNG or JPEG in place, in its
     own format (`overwrite_in_place`: JPEG at quality 92, refused when the
     result has transparency, written to a sibling temp file and renamed

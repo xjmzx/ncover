@@ -11,6 +11,31 @@ to diverge. Its version numbers are independent of these.
 
 ## [Unreleased]
 
+### Added
+- **Convert**, a sixth Batch framing: a PNG becomes a JPEG (quality 92) of
+  the same pixels, `cover.png` → `cover.jpg`, for ndisc's `ncover:convert`
+  lines (a list run of Convert takes exactly those). Anything not a PNG is
+  left alone and counted as such. A PNG with transparent areas is refused,
+  not flattened: JPEG has no alpha, and a background is the editor's or
+  Pad's job. Only the files a run will write claim an output name, so a
+  `cover.jpg` left alone never blocks the `cover.png` beside it. Ported from
+  the macOS sibling (1.1.0), which built it first.
+- **Convert into the library**, which the Mac does not offer yet: the JPEG
+  is written beside the PNG, the PNG is kept in the originals folder under
+  its own name and removed from the library, and the confirm says to
+  rescan in ndisc after. Refused when the library already has the `.jpg`.
+  Its `swap` line in `ncover-log.tsv` carries an **11th column, the library
+  file removed**; only Convert's lines have it, so every other line stays
+  as before and an older reader skips a Convert line instead of misreading
+  it. Put back returns the PNG to its name and removes the JPEG. A log
+  format shared with the Mac, which follows in the same wave.
+
+### Fixed
+- **A file in the scope's own root is named by itself.** Over `_labels`,
+  every logo was captioned `_labels` in the grid and the Files list; now
+  `Peak Oil.png`. A file in a subfolder keeps its folder path, and a list
+  line's name still wins over both. The Mac fixed this first (1.1.1).
+
 ## [0.6.0] — 2026-11-20
 
 ### Fixed
