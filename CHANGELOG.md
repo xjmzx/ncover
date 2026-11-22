@@ -11,6 +11,8 @@ to diverge. Its version numbers are independent of these.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-11-22
+
 ### Added
 - **Convert**, a sixth Batch framing: a PNG becomes a JPEG (quality 92) of
   the same pixels, `cover.png` → `cover.jpg`, for ndisc's `ncover:convert`

@@ -19,7 +19,7 @@ never a database.
 
 Built: all four steps. ndisc's export (0.7.6), and in ncover the list
 scope, Square, Pad, the review grid (0.4.0) and the library write-back
-(0.6.0), and Convert (unreleased, 2026-11-22). Next: the dimension filters.
+(0.6.0), and Convert (0.7.0). Next: the dimension filters.
 
 ## Label art: the same loop, for label images (noted 2026-11-20)
 
