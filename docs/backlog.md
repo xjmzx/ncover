@@ -76,6 +76,66 @@ Square takes 5 logos and Cap 14 once named files ignore the name filter
 5. **macOS**: Phase F7 (several files in one folder) before that app takes
    a label list; F1 for the write-back.
 
+## Next build: notes from the first real Convert (2026-11-23)
+
+From the user, after converting `_labels` into the library (6 written, 2
+refused for transparency; log and originals checked). Fixes first, then
+features.
+
+**Fixes (0.7.1)**
+
+- **The library confirm counts every PNG.** "Replace 8 covers" when 6 will
+  be written: the number is read off the Run label, which counts PNGs, and
+  the 2 transparent ones are refused at run time. Count what the run will
+  write, and name the refusals ("6 covers · 2 PNGs with transparency will
+  be refused"). Under the Label art scope say "labels", not "covers". The
+  "rescan in ndisc" sentence was written for covers; check whether labels
+  need it.
+- **Convert's recipe readout is stale.** Under Convert the line still reads
+  "→ 600×600 PNG" and the size dropdown is still shown, though neither
+  applies: hide the size, and read "→ JPEG, same size".
+- **Cover and Fit offer to run every file**, "Run (320 files)", when 276 of
+  the 319 label images are already 600 × 600 and the recipe says 600 px.
+  They are framings, not tidying jobs, so they write every file by design;
+  but it reads as "320 need work". Either say so in the survey line ("every
+  file is rewritten as a square PNG, including the 276 already 600 px"),
+  or let them skip a file already square at the canvas size.
+- **Remember the last list's folder.** `List…` opens at a default each
+  time; open it where the last cover list was loaded from (ndisc's exports
+  live in `~/Documents/N-suite/ndisc`).
+
+**The "Job" question.** The dropdown labelled with its current value
+("Cover") holds two kinds of thing: framings (Cover, Fit) that write a new
+square PNG for every file, and jobs (Cap, Square, Pad, Convert) that tidy
+only the files that need it. Convert was missed at first because nothing
+says it is there. Options: rename the row ("Job"), split it into two, or
+group the entries with a separator. Not decided.
+
+**Why nothing finds the small labels (checked 2026-11-23).** Every job
+filters only one way. Cap finds images *over* the size and never enlarges;
+Square and Pad find images that are *not square*. Over `_labels` today all
+319 readable images are square and none is over 600, so all four find
+nothing — while 43 are under 600, 9 of them under 400 (Censor Records and
+UIQ at 120, Werk Discs at 150, Play It Again Sam, Science and ~scape at
+200, Believers Roast at 250, Accidental at 300, Tabernacle at 390; 10-30
+Uproar and ECM are 400). That is exactly the planned **long side under N
+px** filter below, and it is the next feature. Note what it is for:
+finding them, not fixing them. Enlarging invents no detail, so the remedy
+for a 120 px logo is a better source (ndisc already flags these as
+`low-res<400` and gives them the `resource` action). The filter should
+make that list easy to see and hand back, maybe as its own Export.
+
+**Features, later**
+
+- **A square border / frame** at 20, 40, 80 or 100 px, drawn round the
+  image (Edit, and perhaps a Batch job). Open: inside the canvas (the art
+  shrinks to make room) or outside it (the canvas grows); the colour from
+  the picker, like the background.
+- **Desaturate / greyscale**, if feasible: an `Operation` in the
+  composition (so it has its vector form via an SVG colour matrix, as
+  Invert does), and perhaps a Batch job. Fits the monochrome-by-default
+  rule for new sites.
+
 ## Dimension filters and the Files list
 
 **Built 2026-11-19:** the `From a list…` scope, reading ndisc's Export list
