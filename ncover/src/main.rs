@@ -989,7 +989,7 @@ fn build_help(window: &ApplicationWindow, shared: &SharedState, to_edit: &Toggle
         "Open a file, or Browse a folder and step with \u{2190} \u{2192}.",
         "Frame it: Fit, Cover, Centre, 1:1, or drag and scroll.",
         "Click any pixel to pick its colour.",
-        "Build: Blank, Invert, + Background, + Square, + Type, and a Disc. Steps stack; Reset clears them.",
+        "Build: Blank (White or Clear), Invert, + Background, + Square, + Type, and a Disc. Steps stack; Reset clears them.",
         "Undo Ctrl+Z, redo Ctrl+Shift+Z or Ctrl+Y.",
         "Save PNG\u{2026} writes a copy. Overwrite replaces the original PNG or JPEG, after asking.",
     ]);
@@ -3199,10 +3199,30 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
     open_btn.set_tooltip_text(Some("Open an image (PNG / SVG / JPEG / WebP)"));
     header.append(&open_btn);
 
-    let blank_btn = Button::with_label("Blank");
+    // Blank is a choice of ground: White (as it always was) or Clear, a
+    // transparent canvas, where + Background fills behind everything at once
+    // and a saved PNG keeps the transparency. A menu, so the header does not
+    // grow a button.
+    let blank_btn = gtk::MenuButton::new();
+    blank_btn.set_label("Blank");
     blank_btn.set_tooltip_text(Some(
-        "Start from a blank white canvas — build a label from nothing but squares (Invert for a black ground)",
+        "Start from nothing: a White canvas, or a Clear (transparent) one — build a label from squares, type and masks",
     ));
+    let blank_pop = gtk::Popover::new();
+    let blank_box = GBox::new(Orientation::Vertical, 2);
+    let blank_white = Button::with_label("White");
+    blank_white.set_tooltip_text(Some("A white canvas. Invert gives a black ground."));
+    let blank_clear = Button::with_label("Clear");
+    blank_clear.set_tooltip_text(Some(
+        "A transparent canvas: only what you build is in the file. + Background fills behind it all, and Save PNG keeps the transparency.",
+    ));
+    for b in [&blank_white, &blank_clear] {
+        b.add_css_class("flat");
+        b.child().and_downcast::<Label>().map(|l| l.set_xalign(0.0));
+        blank_box.append(b);
+    }
+    blank_pop.set_child(Some(&blank_box));
+    blank_btn.set_popover(Some(&blank_pop));
     header.append(&blank_btn);
 
     let browse_btn = Button::with_label("Browse…");
@@ -4947,8 +4967,11 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
             if is_svg {
                 d.source.svg = tip.as_deref().map(PathBuf::from);
             }
-            // Blank has no file and a vector form of its own (white).
-            d.source.blank = tip.is_none() && name.borrow().as_str() == "blank";
+            // Blank has no file and a vector form of its own: white, or (Clear)
+            // nothing at all.
+            let nm = name.borrow().clone();
+            d.source.blank = tip.is_none() && (nm == "blank" || nm == "clear");
+            d.source.clear = tip.is_none() && nm == "clear";
             show_doc(d);
             sync_history();
             ctl.set_visible(true);
@@ -5181,26 +5204,32 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
     // synthesises the pixbuf instead of reading one. The source is a generous
     // flat white; scaling flat white costs nothing and never degrades. No path,
     // so no hover tooltip. A blank also leaves browse mode.
-    blank_btn.connect_clicked(clone!(
-        #[weak]
-        window,
-        #[strong]
-        set_image,
-        #[strong]
-        browse,
-        #[weak]
-        nav,
-        move |_| {
-            match blank_canvas(1000) {
-                Ok(pb) => {
-                    set_image(pb, "blank".to_string(), None, None);
-                    browse.borrow_mut().clear();
-                    nav.set_visible(false);
+    for (b, clear) in [(&blank_white, false), (&blank_clear, true)] {
+        b.connect_clicked(clone!(
+            #[weak]
+            window,
+            #[strong]
+            set_image,
+            #[strong]
+            browse,
+            #[weak]
+            nav,
+            #[weak]
+            blank_pop,
+            move |_| {
+                blank_pop.popdown();
+                let made = if clear { clear_canvas(1000) } else { blank_canvas(1000) };
+                match made {
+                    Ok(pb) => {
+                        set_image(pb, if clear { "clear" } else { "blank" }.to_string(), None, None);
+                        browse.borrow_mut().clear();
+                        nav.set_visible(false);
+                    }
+                    Err(e) => show_error(&window, &format!("Could not create a blank canvas: {e}")),
                 }
-                Err(e) => show_error(&window, &format!("Could not create a blank canvas: {e}")),
             }
-        }
-    ));
+        ));
+    }
 
     pal_btn.connect_clicked(clone!(
         #[weak]

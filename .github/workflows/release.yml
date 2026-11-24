@@ -94,25 +94,44 @@ jobs:
           echo "deb=$deb" >> "$GITHUB_OUTPUT"
           echo "tar=$tar" >> "$GITHUB_OUTPUT"
 
+      - name: Release notes from CHANGELOG.md
+        # The release says what it built: the tag's own CHANGELOG section,
+        # including its "For the macOS sibling" notes, which is how the Mac
+        # app confirms what was built here. A tag with no section fails the
+        # job rather than publishing an empty page.
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          ver="${tag#v}"
+          awk -v v="$ver" 'index($0, "## [" v "]")==1 {f=1; next} f && /^## \[/ {exit} f' CHANGELOG.md > section.md
+          if ! grep -q '[^[:space:]]' section.md; then
+            echo "CHANGELOG.md has no section for $ver" >&2
+            exit 1
+          fi
+          {
+            cat section.md
+            echo
+            echo '---'
+            echo
+            echo 'Linux x86_64. Install the `.deb`:'
+            echo
+            echo '```bash'
+            echo 'sudo apt install ./ncover_*_amd64.deb'
+            echo '```'
+            echo
+            echo 'Or unpack the tarball over `/usr`. Both install **two** binaries:'
+            echo '`ncover` (the GTK4 app) and `xcolor` (the X11 screen picker).'
+            echo 'On Wayland the screen pick goes through the desktop portal; on'
+            echo 'X11 it uses `xcolor`. The app and its in-app eyedropper work'
+            echo 'anywhere GTK4 does.'
+          } > notes.md
+
       - name: Publish
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           draft: false
           generate_release_notes: true
-          body: |
-            Linux x86_64. Install the `.deb`:
-
-            ```bash
-            sudo apt install ./ncover_*_amd64.deb
-            ```
-
-            Or unpack the tarball over `/usr`. Both install **two** binaries:
-            `ncover` (the GTK4 app) and `xcolor` (the X11 picker it shells out
-            to for screen picks).
-
-            X11 only — there is no Wayland path for the screen picker. The app
-            itself, and its in-app eyedropper, work anywhere GTK4 does.
+          body_path: notes.md
           files: |
             ${{ steps.deb.outputs.deb }}
             ${{ steps.deb.outputs.tar }}

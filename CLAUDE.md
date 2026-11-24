@@ -96,6 +96,13 @@ through the UI.
   composites it into `render_raster` is a data bug: the backdrop exists to
   show what the transparent pixels will sit on, which only works if they stay
   transparent in the file.
+- **Blank is White or Clear** (`Source::blank`, plus `Source::clear`).
+  Both are vector sources with no file. White's raster is opaque white and
+  its SVG form a white `<rect>`; Clear's raster is all-transparent and its
+  SVG form is nothing. `set_image` tells them apart by the synthetic names
+  `"blank"` / `"clear"` with no path. + Background on White changes no
+  pixel until something is transparent; that is correct, and the reason
+  Clear exists.
 - **Do not hold a `RefCell` borrow across `mutate`.** Read the value into a
   local first (`let next = doc.borrow().clone();`), then call. The size
   handler used to write `*place.borrow_mut() = place.borrow()…` in one
@@ -338,7 +345,11 @@ porting further features across.
 ## Releasing
 
 `make version V=x.y.z`, update `CHANGELOG.md`, commit, tag `vx.y.z`, push the
-tag. The workflow builds on **ubuntu-24.04** (GTK 4.14) — 22.04 ships GTK 4.6
+tag. **The CHANGELOG section IS the release notes**: the workflow publishes
+the tag's `## [x.y.z]` section above the install text, and fails if there is
+none. Give each release a **For the macOS sibling** subsection (what came
+from the Mac, what was built here first, decisions, test names to port):
+that is how the Mac app confirms what was built here. The workflow builds on **ubuntu-24.04** (GTK 4.14) — 22.04 ships GTK 4.6
 and the GUI asks for gtk4's `v4_12` feature (the grid's `scroll_to`), so it
 fails there at compile time.
 

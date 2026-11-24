@@ -11,6 +11,38 @@ to diverge. Its version numbers are independent of these.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-11-24
+
+### Added
+- **Blank is a choice of White or Clear.** The Blank button opens a menu:
+  **White** is the canvas it always was; **Clear** is a fully transparent
+  one. On Clear only what you build is in the file — squares, type, masks —
+  and **+ Background fills behind all of it at once**, where on White it has
+  nothing transparent to fill until a mask or a Fit margin makes room. Save
+  PNG keeps the transparency; Save SVG writes no ground at all (White writes
+  a white `<rect>`). Invert has nothing to invert on an empty Clear canvas,
+  since it changes colour, not transparency.
+
+### Changed
+- **The release notes are this file.** The workflow publishes the tag's own
+  CHANGELOG section above the install text, so a release says what it built,
+  and the Wayland note no longer claims there is no Wayland screen pick
+  (there has been one, through the portal, since 2026-10-01).
+
+### For the macOS sibling
+- **Built here first, not on the Mac yet: Clear.** A divergence until the
+  Mac follows; `docs/macos-parity-plan.md` here and `docs/gtk-parity-plan.md`
+  there both list it. The shape: the blank source gains a *clear* flag; its
+  raster is all-transparent and its vector form is nothing (where White's is
+  a white `<rect>`); it is still a vector source, so `vectorRefusal` stays
+  nil. Everything else is unchanged.
+- **Tests to port, by name** (`ncover/src/vector.rs`):
+  `a_clear_canvas_is_transparent_and_writes_no_ground` (every pixel
+  transparent; no `<rect>` in the SVG; square + type + rounded mask on it
+  agree with librsvg) and `background_on_a_clear_canvas_fills_behind_what_is_built`
+  (a Background on Clear is the ground everywhere, the square stays on top,
+  the SVG agrees exactly; and on White the same step changes no pixel).
+
 ## [0.8.0] — 2026-11-24
 
 ### Added
@@ -50,6 +82,25 @@ to diverge. Its version numbers are independent of these.
   (Colour, Corner and Background white; Rim black). To use a colour you just
   picked, choose Current from the well's palettes. **Square is no longer
   always black**: its well starts black.
+
+### For the macOS sibling
+- **Type and the colour wells came FROM the Mac** (its `TextRender.swift`,
+  `TextTests`, `PaletteWell`). Nothing to port; the Mac's
+  `docs/gtk-parity-plan.md` line "GTK's phases 2, 3 and 5 are these, still
+  unbuilt there" is now stale: phases 2 and 3 shipped in 0.6.0, phase 5 here.
+- **Where GTK's type differs, on purpose:** no alignment field (lines centre
+  on the block, as the Mac's do); the raster layer is coverage only, so no
+  premultiplied colour is divided back out; and since GTK's document is a
+  stack of steps, `+ Type` adds a step and the controls edit the LAST step
+  live, where the Mac has one live type block.
+- **Where GTK's wells differ:** Batch also has Rim and Corner wells, because
+  GTK's Batch keeps a Gradient disc and the Mac's has only Transparent /
+  White / Colour. The palette button is a drawn 2×2 swatch glyph (no stock
+  GNOME icon says "swatches").
+- **The icon art changed again on 2026-11-24** (dotted ring, crosshair
+  ticks). The Mac takes the rounded `ncover.svg` master as its `icon.svg`
+  and regenerates `ncover.icns` with `make icon`; it is still on the
+  2026-11-22 art.
 
 ## [0.7.0] — 2026-11-22
 
@@ -422,7 +473,8 @@ became installable from a release rather than only from source.
   a Preview contact sheet and a dry run. It never writes over the source.
 - Save as PNG, or overwrite the original PNG in place.
 
-[Unreleased]: https://github.com/xjmzx/ncover/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/xjmzx/ncover/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/xjmzx/ncover/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/xjmzx/ncover/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/xjmzx/ncover/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/xjmzx/ncover/compare/v0.5.2...v0.6.0

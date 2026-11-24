@@ -29,6 +29,9 @@ pub(crate) struct Source {
     pub(crate) svg: Option<PathBuf>,
     /// A Blank canvas: flat white, whose vector form is a white rect.
     pub(crate) blank: bool,
+    /// A Blank that is CLEAR rather than white: transparent, whose vector
+    /// form is nothing at all. Only meaningful with `blank`.
+    pub(crate) clear: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -82,7 +85,7 @@ impl Composition {
     pub(crate) fn new(raster: gdk_pixbuf::Pixbuf, canvas: i32) -> Composition {
         let p = Placement::cover(raster.width(), raster.height(), canvas);
         Composition {
-            source: Source { raster, svg: None, blank: false },
+            source: Source { raster, svg: None, blank: false, clear: false },
             canvas,
             ops: vec![Operation::Place(p)],
         }

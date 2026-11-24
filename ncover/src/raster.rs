@@ -172,6 +172,15 @@ pub(crate) fn blank_canvas(size: i32) -> Result<gdk_pixbuf::Pixbuf> {
     Ok(pb)
 }
 
+/// A Clear canvas: every pixel fully transparent, so whatever is built on it
+/// — squares, type, a background behind them — is all the file holds.
+pub(crate) fn clear_canvas(size: i32) -> Result<gdk_pixbuf::Pixbuf> {
+    let pb = gdk_pixbuf::Pixbuf::new(gdk_pixbuf::Colorspace::Rgb, true, 8, size, size)
+        .context("could not allocate the canvas")?;
+    pb.fill(0x0000_0000);
+    Ok(pb)
+}
+
 /// Invert RGB on a COPY, leaving alpha alone. A colour tool inverts the COLOUR,
 /// not the shape: a transparent pixel stays transparent, it does not become an
 /// opaque black one.

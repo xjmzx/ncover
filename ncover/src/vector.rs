@@ -246,6 +246,8 @@ pub(crate) fn render_vector(doc: &Composition) -> Result<String> {
                 let (w, h) = (p.w(sw), p.h(sh));
                 body = match &svg_text {
                     Some(t) => nested_svg(t, p.dx, p.dy, w, h)?,
+                    // Clear: nothing is drawn, so nothing is written.
+                    None if doc.source.clear => String::new(),
                     // Blank: flat white where the source is placed.
                     None => format!(
                         r##"<rect x="{}" y="{}" width="{}" height="{}" fill="#ffffff"/>"##,
@@ -483,6 +485,52 @@ mod vector_tests {
         let nested = svg.find("<svg x=").unwrap();
         let path = svg.find("<path fill-rule=\"nonzero\"").unwrap();
         assert!(nested < path, "type comes after the artwork in paint order");
+    }
+
+    fn clear_doc(canvas: i32) -> Composition {
+        let mut d = Composition::new(clear_canvas(1000).unwrap(), canvas);
+        d.source.blank = true;
+        d.source.clear = true;
+        d
+    }
+
+    /// Clear is Blank without the white: nothing on the canvas, nothing in
+    /// the file, and still a vector source.
+    #[test]
+    fn a_clear_canvas_is_transparent_and_writes_no_ground() {
+        let mut d = clear_doc(200);
+        assert!(render_raster(&d).unwrap().read_pixel_bytes().iter().all(|b| *b == 0), "every pixel transparent");
+        assert_eq!(d.vector_refusal(), None);
+        let svg = render_vector(&d).unwrap();
+        assert!(!svg.contains("<rect"), "no white ground: {svg}");
+        d.ops.push(Operation::Square { frac: 0.5, colour: Rgb { r: 200, g: 30, b: 60 } });
+        d.ops.push(words("EG", 0.3, Rgb { r: 255, g: 255, b: 255 }));
+        d.ops.push(Operation::Mask { shape: Mask::Rounded(0.4), fill: OuterFill::Alpha, fit: MaskFit::Canvas });
+        let (mean, far) = agreement(&d);
+        assert!(mean < 3.0 && far < 0.02, "mean {mean:.2}, far {:.2}%", far * 100.0);
+    }
+
+    /// The reason to want Clear: Background shows straight away, behind
+    /// everything built, with no mask needed to make room for it. On a White
+    /// blank the same step changes nothing — there is nothing transparent.
+    #[test]
+    fn background_on_a_clear_canvas_fills_behind_what_is_built() {
+        let sq = Operation::Square { frac: 0.5, colour: Rgb { r: 0, g: 0, b: 0 } };
+        let bg = Operation::Background(Rgb { r: 30, g: 160, b: 90 });
+        let mut d = clear_doc(100);
+        d.ops.extend([sq.clone(), bg.clone()]);
+        let pb = render_raster(&d).unwrap();
+        let bytes = pb.read_pixel_bytes();
+        assert_eq!(sample(&pb, &bytes, 2, 2), (30, 160, 90, 255), "the ground is the background");
+        assert_eq!(sample(&pb, &bytes, 50, 50), (0, 0, 0, 255), "the square stays on top");
+        assert_eq!(agreement(&d).1, 0.0, "and the SVG agrees");
+
+        let mut white = Composition::new(blank_canvas(1000).unwrap(), 100);
+        white.source.blank = true;
+        white.ops.push(sq);
+        let before = render_raster(&white).unwrap().read_pixel_bytes().to_vec();
+        white.ops.push(bg);
+        assert_eq!(render_raster(&white).unwrap().read_pixel_bytes().to_vec(), before, "nothing to fill behind on White");
     }
 
     #[test]

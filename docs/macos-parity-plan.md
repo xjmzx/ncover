@@ -315,6 +315,13 @@ export to be worth having.
 - **Docs.** Each phase adds its own "Traps" section to this repo's
   `CLAUDE.md`, in the same spirit as the Mac file, and a CHANGELOG entry.
 
+## Built here first, for the Mac to follow
+
+- **Clear** (0.9.0, 2026-11-24): Blank is White or Clear; Clear is a
+  transparent vector source with no SVG ground. The Mac's Blank is
+  white-only, so this is a divergence until it follows. The 0.9.0 release
+  notes carry the shape and the two tests to port.
+
 ## The other direction, after 0.4.0
 
 What travels from here to the Mac now lives in that repo's
