@@ -11,6 +11,46 @@ to diverge. Its version numbers are independent of these.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-11-24
+
+### Added
+- **A new app icon**, from the 2026-11-24 master: the "n" on `#00AEFF` inside
+  a dotted ring with crosshair ticks. The plain (rounded) export, cropped to
+  the Linux 89% fill as before.
+- **Type** (parity plan phase 5, from the macOS sibling): `+ Type` sets
+  words on the canvas in any installed font, over what is already there.
+  Size and position are fractions of the canvas, so type scales with the
+  output; the size slider is logarithmic from 2% to 200% and reads out in
+  percent and pixels. Tracking, line height (for more than one line; Enter
+  starts a new one, nothing wraps), and nine places plus Across / Down. While
+  the last step is type, the controls edit it live, and they follow undo.
+  A font that is not installed says so rather than being substituted
+  silently.
+  - **Saved as SVG, type is outlines** (`fill-rule="nonzero"` paths), never
+    `<text font-family>`. One layout (`layout_text`) feeds both the raster
+    and the vector side; read back through librsvg the SVG matches the
+    raster to a mean difference of 0.17 / 255, with no pixel further apart
+    than an antialiased rim. A Blank canvas with type and a disc saves as SVG.
+  - Drawn through Pango / Cairo (the new `pangocairo` dependency) with
+    greyscale antialiasing and no metric hinting, and composited as coverage
+    in straight alpha, so a letter's edge keeps its colour through a mask.
+- **Colour wells**, as the macOS sibling's: a swatch that opens the system
+  colour chooser, linked to a palette button whose popover holds the current
+  pick, recent colours and the pinned palettes. Choosing from either sets the
+  well only; it is not a pick and does not reorder the history.
+  - In Edit: Type, Square, + Background, and the mask fills (Colour, and a
+    Gradient's Rim and Corner) each have one.
+  - In Batch: Colour (a Colour disc, or Pad's Colour bars), and Rim and
+    Corner for a Gradient disc, shown only when the recipe uses them.
+
+### Changed
+- **Fills no longer take the last pick implicitly.** The mask's Colour and
+  Gradient, + Background and Batch's colour fills used the current and
+  previous picks; they now read their wells, which start where the Mac's do
+  (Colour, Corner and Background white; Rim black). To use a colour you just
+  picked, choose Current from the well's palettes. **Square is no longer
+  always black**: its well starts black.
+
 ## [0.7.0] — 2026-11-22
 
 ### Added
@@ -382,7 +422,9 @@ became installable from a release rather than only from source.
   a Preview contact sheet and a dry run. It never writes over the source.
 - Save as PNG, or overwrite the original PNG in place.
 
-[Unreleased]: https://github.com/xjmzx/ncover/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/xjmzx/ncover/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/xjmzx/ncover/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/xjmzx/ncover/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/xjmzx/ncover/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/xjmzx/ncover/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/xjmzx/ncover/compare/v0.5.0...v0.5.1

@@ -231,6 +231,25 @@ it inside `compose` for Cover / Fit shrinking.
 
 ## Phase 5: type
 
+**Type built 2026-11-24 (unreleased).** What landed, against the plan below:
+`text.rs` (`TextSpec`, `layout_text`, `draw_text`, `text_svg_path`), the Mac's
+`TextTests` ported by name, and a librsvg agreement test
+(`type_svg_matches_the_raster_side`: mean 0.17 / 255, no far pixels). Two
+departures, both towards the Mac: **no alignment field** (lines centre on the
+block, as the Mac's do; the plan's "alignment" was never in `TextSpec`
+there), and the raster layer is **coverage only**, so there is no
+premultiplied colour to divide back out. The editor's Type controls edit the
+LAST step live when it is type (the Mac has one live type block; GTK's model
+is a stack of steps, so `+ Type` adds and the controls follow the last).
+
+**Colour wells built 2026-11-24 (unreleased)**, matching the Mac's seven:
+Type, Square, Background, the mask's Colour, Rim and Corner, and Batch's
+fill (here also Rim / Corner, since GTK's Batch keeps a Gradient disc the
+Mac's does not). `ColourWell` (main.rs) is the Mac's `PaletteWell`: a
+`ColorDialogButton` linked to a palette `MenuButton`. This retired the GTK
+habit of fills taking the current and previous pick implicitly, and Square
+gained a colour; both recorded in the CHANGELOG as changes.
+
 Needs phase 3 for the vector half. This is the part that differs most from
 the Mac implementation, because it uses Pango/Cairo instead of Core Text/CG.
 
@@ -265,7 +284,7 @@ both gradient stops, background, batch, text) gets a popover with the current
 colour, recent history and pinned palettes. This is cheap once `build_swatch_flow`
 can be reused inside a `Popover`.
 
-Release as **0.6.0**.
+Release as **0.6.0** (planned; 0.6.0 shipped phases 2–3, so type is the next release).
 
 ---
 
@@ -280,7 +299,7 @@ Release as **0.6.0**.
 | 4 | Batch survey, auto-preview, failure reasons | M | — |
 | 5 | Type + colour-well popovers | L | 3 |
 
-Recommended: **0 → 1 → 4 → 2 → 3 → 5.** (0, 1 and 4 done 2026-11-13.) Phase 0 de-risks everything, and
+Recommended: **0 → 1 → 4 → 2 → 3 → 5.** (0, 1 and 4 done 2026-11-13; 2 and 3 in 0.6.0; 5's type 2026-11-24.) Phase 0 de-risks everything, and
 phase 1 is the cheapest visible win. Phase 4 is independent and the most
 useful day to day. Type comes last because it is the largest and needs vector
 export to be worth having.

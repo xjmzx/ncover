@@ -31,7 +31,7 @@ pub(crate) struct Source {
     pub(crate) blank: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Operation {
     /// Draw the source onto the canvas at this placement.
     Place(Placement),
@@ -49,18 +49,22 @@ pub(crate) enum Operation {
     Square { frac: f64, colour: Rgb },
     /// A solid colour behind everything so far; the canvas comes out opaque.
     Background(Rgb),
+    /// Words set in a font, drawn over what is there (text.rs). Exported as
+    /// outlines, so it has a vector form whatever the font.
+    Text(TextSpec),
 }
 
 impl Operation {
     /// A name for a person, for error messages now and refusals later.
-    pub(crate) fn label(&self) -> &'static str {
+    pub(crate) fn label(&self) -> String {
         match self {
-            Operation::Place(_) => "Place",
-            Operation::Mask { shape, .. } => shape.label(),
-            Operation::Invert => "Invert",
-            Operation::Template(_) => "Template",
-            Operation::Square { .. } => "Square",
-            Operation::Background(_) => "Background",
+            Operation::Place(_) => "Place".into(),
+            Operation::Mask { shape, .. } => shape.label().into(),
+            Operation::Invert => "Invert".into(),
+            Operation::Template(_) => "Template".into(),
+            Operation::Square { .. } => "Square".into(),
+            Operation::Background(_) => "Background".into(),
+            Operation::Text(t) => t.label(),
         }
     }
 }
@@ -114,9 +118,9 @@ impl Composition {
     /// Draw the source, or keep it as a guide only; the placement is kept.
     pub(crate) fn set_template(&mut self, on: bool) {
         for op in self.ops.iter_mut() {
-            match (*op, on) {
-                (Operation::Place(p), true) => *op = Operation::Template(p),
-                (Operation::Template(p), false) => *op = Operation::Place(p),
+            match (&*op, on) {
+                (Operation::Place(p), true) => *op = Operation::Template(*p),
+                (Operation::Template(p), false) => *op = Operation::Place(*p),
                 _ => {}
             }
         }
@@ -173,6 +177,7 @@ pub(crate) fn render_raster(doc: &Composition) -> Result<gdk_pixbuf::Pixbuf> {
             Operation::Template(_) => cur, // a guide, never a mark
             Operation::Square { frac, colour } => stamp_square(&cur, frac, colour)?,
             Operation::Background(c) => fill_behind(&cur, c)?,
+            Operation::Text(ref t) => draw_text(&cur, t)?,
         };
     }
     Ok(cur)
@@ -194,6 +199,7 @@ pub(crate) fn render_for_write(doc: &Composition) -> Result<gdk_pixbuf::Pixbuf> 
             Operation::Template(_) => cur, // a guide, never a mark
             Operation::Square { frac, colour } => stamp_square(&cur, frac, colour)?,
             Operation::Background(c) => fill_behind(&cur, c)?,
+            Operation::Text(ref t) => draw_text(&cur, t)?,
         };
     }
     Ok(cur)

@@ -317,6 +317,12 @@ pub(crate) fn render_vector(doc: &Composition) -> Result<String> {
                 // UNDER what is drawn: earlier in document order.
                 body = format!(r#"<rect width="{}" height="{}" fill="{}"/>{body}"#, f(c), f(c), hex(col));
             }
+            Operation::Text(ref t) => {
+                // ON what came before, as outlines (text.rs says why).
+                if let Some(path) = text_svg_path(t, doc.canvas)? {
+                    body.push_str(&path);
+                }
+            }
         }
     }
     let defs = if defs.is_empty() { String::new() } else { format!("\n  <defs>{}</defs>", defs.concat()) };
@@ -435,6 +441,48 @@ mod vector_tests {
         assert_eq!(d.vector_refusal(), None);
         let (mean, far) = agreement(&d);
         assert!(mean < 3.0 && far < 0.02, "mean {mean:.2}, far {:.2}%", far * 100.0);
+    }
+
+    fn words(text: &str, size: f64, colour: Rgb) -> Operation {
+        Operation::Text(TextSpec { text: text.into(), font: "DejaVu Sans Bold".into(), size, colour, ..TextSpec::default() })
+    }
+
+    /// The reason `layout_text` exists: the outlines in the SVG land on the
+    /// pixels the raster side drew. Read back through librsvg, and compared
+    /// with the same thresholds as every other step.
+    #[test]
+    fn type_svg_matches_the_raster_side() {
+        let mut d = Composition::new(blank_canvas(1000).unwrap(), 400);
+        d.source.blank = true;
+        d.ops.push(words("Peak Oil\nrecords", 0.12, Rgb { r: 20, g: 20, b: 20 }));
+        let mut tracked = TextSpec { text: "AV wa".into(), size: 0.3, y: 0.2, tracking: 0.2, ..TextSpec::default() };
+        tracked.colour = Rgb { r: 200, g: 30, b: 60 };
+        d.ops.push(Operation::Text(tracked));
+        let (mean, far) = agreement(&d);
+        assert!(mean < 1.5 && far < 0.01, "mean {mean:.2}, far {:.2}%", far * 100.0);
+    }
+
+    #[test]
+    fn a_blank_canvas_with_type_and_a_disc_saves_as_svg() {
+        let mut d = Composition::new(blank_canvas(1000).unwrap(), 200);
+        d.source.blank = true;
+        d.ops.push(words("EG", 0.4, Rgb { r: 0, g: 0, b: 0 }));
+        d.ops.push(Operation::Mask { shape: Mask::Disc, fill: OuterFill::Alpha, fit: MaskFit::Canvas });
+        assert_eq!(d.vector_refusal(), None, "outlines are expressible");
+        let svg = render_vector(&d).unwrap();
+        assert!(!svg.contains("<text") && !svg.contains("font-family"));
+        let (mean, far) = agreement(&d);
+        assert!(mean < 3.0 && far < 0.02, "mean {mean:.2}, far {:.2}%", far * 100.0);
+    }
+
+    #[test]
+    fn type_is_drawn_over_the_artwork_that_came_before() {
+        let mut d = doc_from(LOGO, 200);
+        d.ops.push(words("EG", 0.4, Rgb { r: 0, g: 0, b: 0 }));
+        let svg = render_vector(&d).unwrap();
+        let nested = svg.find("<svg x=").unwrap();
+        let path = svg.find("<path fill-rule=\"nonzero\"").unwrap();
+        assert!(nested < path, "type comes after the artwork in paint order");
     }
 
     #[test]

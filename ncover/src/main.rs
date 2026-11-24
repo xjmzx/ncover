@@ -25,6 +25,7 @@ mod palette;
 mod raster;
 mod samples;
 mod svg;
+mod text;
 mod vector;
 mod writeback;
 
@@ -35,6 +36,7 @@ use palette::*;
 use raster::*;
 use samples::*;
 use svg::*;
+use text::*;
 use vector::*;
 use writeback::*;
 
@@ -481,6 +483,182 @@ fn build_swatch_flow(
     flow
 }
 
+/// A colour well that knows this app's own colours — the macOS sibling's
+/// PaletteWell. Two buttons, linked: the swatch opens the system colour
+/// chooser (GTK's ColorDialog, the Mac's Colours panel) for any colour at
+/// all, and the palette button beside it holds the current pick, the recent
+/// colours and the pinned palettes. Having just picked a colour off the
+/// artwork, it is one click from the control that needs it.
+///
+/// Choosing here is NOT picking: it sets the well and touches neither the
+/// current colour nor the history, or setting a fill to a colour you already
+/// had would reorder the very list you took it from under your hand.
+#[derive(Clone)]
+struct ColourWell {
+    /// The two buttons; this is what goes in a layout.
+    widget: GBox,
+    colour: Rc<Cell<Rgb>>,
+    swatch: gtk::ColorDialogButton,
+    /// Called after the person chooses a colour, from either half.
+    on_take: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
+}
+
+fn rgba_of(c: Rgb) -> gtk::gdk::RGBA {
+    gtk::gdk::RGBA::new(c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0, 1.0)
+}
+
+fn rgb_of(c: &gtk::gdk::RGBA) -> Rgb {
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    Rgb { r: q(c.red()), g: q(c.green()), b: q(c.blue()) }
+}
+
+impl ColourWell {
+    fn new(shared: &SharedState, initial: Rgb, tip: &str) -> ColourWell {
+        let colour = Rc::new(Cell::new(initial));
+        let dialog = gtk::ColorDialog::new();
+        dialog.set_with_alpha(false);
+        let swatch = gtk::ColorDialogButton::new(Some(dialog));
+        swatch.set_rgba(&rgba_of(initial));
+        swatch.set_tooltip_text(Some(tip));
+        let pal = gtk::MenuButton::new();
+        // Four small swatches, drawn in the theme's text colour: the Mac's
+        // `swatchpalette`. No stock icon says this — `color-select` is an
+        // eyedropper (it reads as "pick from the screen"), and Yaru draws its
+        // colour and graphics icons as RGB circles or a picture frame.
+        let glyph = DrawingArea::new();
+        glyph.set_content_width(16);
+        glyph.set_content_height(16);
+        glyph.set_draw_func(|da, cr, w, h| {
+            let fg = da.color();
+            let s = (w.min(h) as f64 - 2.0) / 2.0;
+            let (ox, oy) = ((w as f64 - 2.0 * s - 2.0) / 2.0, (h as f64 - 2.0 * s - 2.0) / 2.0);
+            for (i, a) in [1.0, 0.75, 0.5, 0.3].into_iter().enumerate() {
+                let (x, y) = ((i % 2) as f64, (i / 2) as f64);
+                cr.set_source_rgba(fg.red() as f64, fg.green() as f64, fg.blue() as f64, fg.alpha() as f64 * a);
+                cr.rectangle(ox + x * (s + 2.0), oy + y * (s + 2.0), s, s);
+                let _ = cr.fill();
+            }
+        });
+        pal.set_child(Some(&glyph));
+        pal.set_tooltip_text(Some("Your current pick, recent colours and pinned palettes"));
+        let widget = GBox::new(Orientation::Horizontal, 0);
+        widget.add_css_class("linked");
+        widget.set_valign(gtk::Align::Center);
+        widget.append(&swatch);
+        widget.append(&pal);
+        let well = ColourWell { widget, colour, swatch, on_take: Rc::new(RefCell::new(None)) };
+
+        // The chooser's answer. `set` stores the colour BEFORE moving the
+        // button, so a colour set from code arrives here equal and is not
+        // mistaken for a choice.
+        let w = well.clone();
+        well.swatch.connect_rgba_notify(move |b| {
+            let c = rgb_of(&b.rgba());
+            if c != w.colour.get() {
+                w.colour.set(c);
+                w.took();
+            }
+        });
+
+        let pop = gtk::Popover::new();
+        pal.set_popover(Some(&pop));
+        // Rebuilt every time it opens, so it is never a stale copy of the
+        // history or the pins.
+        let w = well.clone();
+        let shared = shared.clone();
+        pal.set_create_popup_func(move |b| {
+            let Some(pop) = b.popover().and_downcast::<gtk::Popover>() else { return };
+            pop.set_child(Some(&w.choices(&shared, &pop)));
+        });
+        well
+    }
+
+    fn get(&self) -> Rgb {
+        self.colour.get()
+    }
+
+    /// Set from code (undo, a document): no `on_take`.
+    fn set(&self, c: Rgb) {
+        if self.colour.get() != c {
+            self.colour.set(c);
+            self.swatch.set_rgba(&rgba_of(c));
+        }
+    }
+
+    fn took(&self) {
+        let hook = self.on_take.borrow().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    fn choices(&self, shared: &SharedState, pop: &gtk::Popover) -> GBox {
+        let s = shared.borrow();
+        let fmt = s.data.format;
+        let mut groups: Vec<(String, Vec<Rgb>)> = Vec::new();
+        if let Some(c) = s.current {
+            groups.push(("Current".into(), vec![c]));
+        }
+        if !s.data.history.is_empty() {
+            groups.push(("Recent".into(), s.data.history.iter().take(SWATCHES_PER_ROW * 2).copied().collect()));
+        }
+        for name in s.data.pinned.iter().take(PINNED_MAX) {
+            if let Some(p) = s.data.palettes.iter().find(|p| &p.name == name) {
+                let title = if p.name.is_empty() { "(unnamed)".to_string() } else { p.name.clone() };
+                groups.push((title, p.colors.iter().map(|w| w.rgb).collect()));
+            }
+        }
+        drop(s);
+        let col = GBox::new(Orientation::Vertical, 8);
+        col.set_margin_top(6);
+        col.set_margin_bottom(6);
+        col.set_margin_start(6);
+        col.set_margin_end(6);
+        if groups.is_empty() {
+            let l = Label::new(Some("Nothing yet \u{2014} pick a colour, or pin a palette in Palettes."));
+            l.add_css_class("dim-label");
+            l.set_wrap(true);
+            l.set_max_width_chars(28);
+            col.append(&l);
+            return col;
+        }
+        for (title, colours) in groups {
+            let head = Label::new(Some(&title));
+            head.add_css_class("dim-label");
+            head.set_xalign(0.0);
+            col.append(&head);
+            let flow = gtk::FlowBox::new();
+            flow.set_selection_mode(gtk::SelectionMode::None);
+            flow.set_max_children_per_line(SWATCHES_PER_ROW as u32);
+            flow.set_min_children_per_line(SWATCHES_PER_ROW.min(colours.len()) as u32);
+            flow.set_column_spacing(0);
+            flow.set_row_spacing(0);
+            flow.add_css_class("swatch-flow");
+            for c in colours {
+                let chip = DrawingArea::new();
+                chip.set_size_request(22, 22);
+                chip.set_draw_func(move |_, cr, w, h| {
+                    cr.set_source_rgb(c.r as f64 / 255.0, c.g as f64 / 255.0, c.b as f64 / 255.0);
+                    cr.rectangle(0.0, 0.0, w as f64, h as f64);
+                    let _ = cr.fill();
+                });
+                chip.set_tooltip_text(Some(&c.format(fmt)));
+                let click = gtk::GestureClick::new();
+                let (me, pop) = (self.clone(), pop.clone());
+                click.connect_released(move |_, _, _, _| {
+                    me.set(c);
+                    pop.popdown();
+                    me.took();
+                });
+                chip.add_controller(click);
+                flow.insert(&chip, -1);
+            }
+            col.append(&flow);
+        }
+        col
+    }
+}
+
 /// A compact palette: a title over the swatch flow. Read-mostly — no edit
 /// affordances, that is the Palettes view's job.
 fn build_compact_strip(
@@ -811,7 +989,7 @@ fn build_help(window: &ApplicationWindow, shared: &SharedState, to_edit: &Toggle
         "Open a file, or Browse a folder and step with \u{2190} \u{2192}.",
         "Frame it: Fit, Cover, Centre, 1:1, or drag and scroll.",
         "Click any pixel to pick its colour.",
-        "Build: Blank, Invert, + Background, + Square, and a Disc. Steps stack; Reset clears them.",
+        "Build: Blank, Invert, + Background, + Square, + Type, and a Disc. Steps stack; Reset clears them.",
         "Undo Ctrl+Z, redo Ctrl+Shift+Z or Ctrl+Y.",
         "Save PNG\u{2026} writes a copy. Overwrite replaces the original PNG or JPEG, after asking.",
     ]);
@@ -1096,14 +1274,14 @@ fn build_batch(
 
     let dd_disc = gtk::DropDown::from_strings(&["No disc", "Alpha", "White", "Colour", "Gradient"]);
     dd_disc.set_tooltip_text(Some(
-        "Disc mask + corner fill. Colour/Gradient take the colours you have picked, exactly as the single-image Disc buttons do.",
+        "Disc mask + corner fill. Colour and Gradient take their colours from the wells below, as the editor's mask fills do.",
     ));
     row_r.append(&dd_disc);
     // Pad's bar fill takes the disc's place: a disc has no room under Pad
     // (it keeps the file's format), and the row stays one row.
     let dd_pad = gtk::DropDown::from_strings(&["Edge colour", "White", "Black", "Colour"]);
     dd_pad.set_tooltip_text(Some(
-        "What fills Pad's bars. Edge colour: each bar takes the average of the image edge beside it, transparency included. Colour: the colour you have picked.",
+        "What fills Pad's bars. Edge colour: each bar takes the average of the image edge beside it, transparency included. Colour: the Colour well below.",
     ));
     dd_pad.set_visible(false);
     row_r.append(&dd_pad);
@@ -1140,32 +1318,23 @@ fn build_batch(
 
     body.append(&row_r);
 
-    // The colours Colour / Gradient would use. They are picked on the Picker
-    // page, so this page shows them rather than leave the fill a guess.
+    // The colours a Colour or Gradient disc, or Pad's Colour bars, use: wells,
+    // as in the editor and the macOS sibling, rather than whatever was picked
+    // last on another page. Only the ones the recipe uses are shown (the
+    // ticker keeps that current). The recipe reads them, so they are part of
+    // its key and a change re-renders the grid.
     let row_note = GBox::new(Orientation::Horizontal, 8);
-    let chip = DrawingArea::new();
-    chip.set_content_width(34);
-    chip.set_content_height(16);
-    chip.set_valign(gtk::Align::Center);
-    chip.set_tooltip_text(Some("The picked colours a Colour or Gradient disc uses: the current one, then the one before. Pick on the Edit page."));
-    {
-        let shared = shared.clone();
-        chip.set_draw_func(move |_, cr, w, h| {
-            let st = shared.borrow();
-            let cur = st.current.or_else(|| st.data.history.first().copied());
-            let prev = st.data.history.get(1).copied().or(cur);
-            for (i, c) in [cur, prev].into_iter().enumerate() {
-                let x = i as f64 * w as f64 / 2.0;
-                match c {
-                    Some(c) => cr.set_source_rgb(c.r as f64 / 255.0, c.g as f64 / 255.0, c.b as f64 / 255.0),
-                    None => cr.set_source_rgba(1.0, 1.0, 1.0, 0.1),
-                }
-                cr.rectangle(x, 0.0, w as f64 / 2.0, h as f64);
-                let _ = cr.fill();
-            }
-        });
+    let bw_fill = ColourWell::new(shared, Rgb { r: 255, g: 255, b: 255 }, "Colour: outside the disc, or Pad's bars, in every output");
+    let bw_rim = ColourWell::new(shared, Rgb { r: 0, g: 0, b: 0 }, "Gradient: the colour at the disc's rim");
+    let bw_corner = ColourWell::new(shared, Rgb { r: 255, g: 255, b: 255 }, "Gradient: the colour at the corners");
+    let mut batch_wells: Vec<(Label, ColourWell)> = Vec::new();
+    for (text, w) in [("Colour", &bw_fill), ("Rim", &bw_rim), ("Corner", &bw_corner)] {
+        let l = Label::new(Some(text));
+        l.add_css_class("dim-label");
+        row_note.append(&l);
+        row_note.append(&w.widget);
+        batch_wells.push((l, w.clone()));
     }
-    row_note.append(&chip);
     let size_note = Label::new(None);
     size_note.add_css_class("dim-label");
     size_note.set_hexpand(true);
@@ -1788,31 +1957,18 @@ fn build_batch(
     // colours ONCE here, so every file in a run gets the same fill even if you
     // pick while it runs — and a Preview shows exactly that fill.
     let recipe_now: Rc<dyn Fn() -> std::result::Result<Recipe, String>> = {
-        let shared = shared.clone();
         let canvas = canvas.clone();
         let dd_frame = dd_frame.clone();
         let dd_disc = dd_disc.clone();
         let dd_pad = dd_pad.clone();
+        let (bw_fill, bw_rim, bw_corner) = (bw_fill.clone(), bw_rim.clone(), bw_corner.clone());
         Rc::new(move || {
-            let (cur, prev) = {
-                let st = shared.borrow();
-                (
-                    st.current.or_else(|| st.data.history.first().copied()),
-                    st.data.history.get(1).copied().or(st.current),
-                )
-            };
             let disc = match dd_disc.selected() {
                 0 => None,
                 1 => Some(OuterFill::Alpha),
                 2 => Some(OuterFill::White),
-                3 => match cur {
-                    Some(c) => Some(OuterFill::Solid(c)),
-                    None => return Err("Pick a colour first — that is the fill.".into()),
-                },
-                _ => match (cur, prev) {
-                    (Some(i), Some(o)) => Some(OuterFill::Gradient { inner: i, outer: o }),
-                    _ => return Err("A gradient needs two colours — pick a second one.".into()),
-                },
+                3 => Some(OuterFill::Solid(bw_fill.get())),
+                _ => Some(OuterFill::Gradient { inner: bw_rim.get(), outer: bw_corner.get() }),
             };
             let framing = framing_at(dd_frame.selected());
             if let Framing::Pad(_) = framing {
@@ -1820,10 +1976,7 @@ fn build_batch(
                     0 => PadFill::Edge,
                     1 => PadFill::Solid(Rgb { r: 255, g: 255, b: 255 }),
                     2 => PadFill::Solid(Rgb { r: 0, g: 0, b: 0 }),
-                    _ => match cur {
-                        Some(c) => PadFill::Solid(c),
-                        None => return Err("Pick a colour first \u{2014} that fills the bars.".into()),
-                    },
+                    _ => PadFill::Solid(bw_fill.get()),
                 };
                 // The disc dropdown is hidden under Pad; whatever it says
                 // does not apply.
@@ -2446,9 +2599,19 @@ fn build_batch(
         if l_why.text() != shown {
             l_why.set_text(&shown);
         }
-        // The picked colours change on the Picker page and fire nothing here.
-        chip.set_visible(if dd_pad.is_visible() { dd_pad.selected() == 3 } else { dd_disc.selected() >= 3 });
-        chip.queue_draw();
+        // Show only the wells the recipe uses.
+        let (fill_on, grad_on) = if dd_pad.is_visible() {
+            (dd_pad.selected() == 3, false)
+        } else if dd_disc.is_visible() {
+            (dd_disc.selected() == 3, dd_disc.selected() == 4)
+        } else {
+            (false, false)
+        };
+        for (i, (l, w)) in batch_wells.iter().enumerate() {
+            let on = if i == 0 { fill_on } else { grad_on };
+            l.set_visible(on);
+            w.widget.set_visible(on);
+        }
         let skey = scope_key();
         if shown_scope.borrow().as_ref() != Some(&skey) {
             // The count on the button is about to be wrong; stop promising it.
@@ -3208,6 +3371,10 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
         })
     };
 
+    // Told about every document put on screen (edit, undo, redo, a new file),
+    // after it is THE document. The Type controls fill it, so they follow undo.
+    let doc_shown: Rc<RefCell<Option<Rc<dyn Fn(&Composition)>>>> = Rc::new(RefCell::new(None));
+
     // Put a document on screen: render it, and only if that succeeds make it
     // THE document. Records nothing — `mutate` is the edit path, and undo /
     // redo / opening a file call this directly.
@@ -3225,6 +3392,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
         let canvas = canvas.clone();
         let size_dd = size_dd.clone();
         let shared = shared.clone();
+        let doc_shown = doc_shown.clone();
         Rc::new(move |next: Composition| {
             let built = next.has_build();
             match next.vector_refusal() {
@@ -3246,7 +3414,7 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
                 match render_raster(&next) {
                     Ok(pb) => Some(pb),
                     Err(e) => {
-                        let step = next.ops.last().map_or("Build", |op| op.label());
+                        let step = next.ops.last().map_or("Build".to_string(), |op| op.label());
                         show_error(&window, &format!("{step} failed: {e}"));
                         return false;
                     }
@@ -3266,8 +3434,13 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
                 s.data.canvas = next.canvas;
                 let _ = save_data(&s.data);
             }
+            let shown = next.clone();
             *doc.borrow_mut() = Some(next);
             *result.borrow_mut() = rendered;
+            let hook = doc_shown.borrow().clone();
+            if let Some(hook) = hook {
+                hook(&shown);
+            }
             // Framing alone is worth writing (a cover squared by hand), so
             // both are on whenever there is a document, built or not.
             b_save.set_sensitive(true);
@@ -3883,9 +4056,9 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
     box_.append(&inspect_scroll);
 
     // ---- Template row ------------------------------------------------------
-    // Disc mask with four corner treatments. Solid/Gradient take their colours
-    // from what you have already picked — the palettes ARE the input, which is
-    // the whole reason this lives in a colour tool rather than an image editor.
+    // Disc mask with four corner treatments. Solid / Gradient take their
+    // colours from the wells in the Mask row; each well's palette half holds
+    // your picks and pinned palettes, so the palettes are still the input.
     // ---- Mask row: which shape, how much, fitted to what -------------------
     // The fill buttons below apply it. Rounded and Chamfer take an amount (a
     // fraction of half the side: Rounded at 100% is the disc); Artwork fits
@@ -3923,6 +4096,19 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
             mask_gap.set_visible(!amount);
         }
     ));
+    // The fill colours, as the macOS sibling's wells: Colour fills outside the
+    // mask; a Gradient runs from the rim colour to the corner colour. Each
+    // starts where the Mac's does and is set here, not taken from the last
+    // pick — the palette half of each well holds that pick, one click away.
+    let w_solid = ColourWell::new(shared, Rgb { r: 255, g: 255, b: 255 }, "Colour fill: what goes outside the mask");
+    let w_rim = ColourWell::new(shared, Rgb { r: 0, g: 0, b: 0 }, "Gradient: the colour at the mask's rim");
+    let w_corner = ColourWell::new(shared, Rgb { r: 255, g: 255, b: 255 }, "Gradient: the colour at the corners");
+    for (text, w) in [("Colour", &w_solid), ("Rim", &w_rim), ("Corner", &w_corner)] {
+        let l = Label::new(Some(text));
+        l.add_css_class("dim-label");
+        msk.append(&l);
+        msk.append(&w.widget);
+    }
     let mask_fit = gtk::DropDown::from_strings(&["Canvas", "Artwork"]);
     mask_fit.set_tooltip_text(Some(
         "Canvas: the mask fills the canvas. Artwork: the mask fits the square around what is drawn, so a disc over an inset logo is a disc of the logo.",
@@ -3939,10 +4125,10 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
     b_alpha.set_tooltip_text(Some("Corners transparent — the honest default for artwork on an unknown background"));
     let b_white = Button::with_label("White");
     let b_solid = Button::with_label("Colour");
-    b_solid.set_tooltip_text(Some("Corners filled with the CURRENT colour"));
+    b_solid.set_tooltip_text(Some("Fill outside the mask with the Colour well's colour"));
     let b_grad = Button::with_label("Gradient");
     b_grad.set_tooltip_text(Some(
-        "Radial from the rim outward: current colour at the rim, the previous pick at the corners",
+        "Radial from the rim outward: the Rim well's colour at the rim, the Corner well's at the corners",
     ));
     let b_reset = Button::with_label("Reset");
     b_reset.set_tooltip_text(Some("Back to the original image"));
@@ -3972,10 +4158,12 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
 
     let b_bg = Button::with_label("+ Background");
     b_bg.set_tooltip_text(Some(
-        "Fill BEHIND the picture with the current colour: the bars Fit leaves, or a disc's transparent corners. \
-         The canvas comes out opaque, so a JPEG can be overwritten. Pick a colour from the cover first to match it.",
+        "Fill BEHIND the picture with the well's colour: the bars Fit leaves, or a disc's transparent corners. \
+         The canvas comes out opaque, so a JPEG can be overwritten. To match the cover, pick from it and take Current from the well's palettes.",
     ));
     bld.append(&b_bg);
+    let w_bg = ColourWell::new(shared, Rgb { r: 255, g: 255, b: 255 }, "Background colour: what goes behind the picture");
+    bld.append(&w_bg.widget);
 
     let sq_lbl = Label::new(Some("Square"));
     sq_lbl.add_css_class("dim-label");
@@ -3992,8 +4180,10 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
 
     let b_square = Button::with_label("+ Square");
     b_square.set_tooltip_text(Some(
-        "Stamp a centred black square at this size. Stamp several, at different sizes, to build a design.",
+        "Stamp a centred square at this size, in the well's colour. Stamp several, at different sizes, to build a design.",
     ));
+    let w_square = ColourWell::new(shared, Rgb { r: 0, g: 0, b: 0 }, "Square colour");
+    bld.append(&w_square.widget);
     bld.append(&b_square);
 
     for b in [&b_invert, &b_bg, &b_square] {
@@ -4002,6 +4192,135 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
     sq_scale.set_sensitive(false);
     bld.set_visible(false);
     box_.append(&bld);
+
+    // ---- Type: words set in a font, exported as outlines (text.rs) ---------
+    // + Type adds a step from these controls. While the LAST step is type,
+    // the controls edit it live — so you set the words by looking at them —
+    // and they follow undo. Otherwise they are the recipe for the next one.
+    let typ = GBox::new(Orientation::Vertical, 4);
+    let typ_a = GBox::new(Orientation::Horizontal, 6);
+    let typ_lbl = Label::new(Some("Type"));
+    typ_lbl.add_css_class("dim-label");
+    typ_a.append(&typ_lbl);
+    let t_words = gtk::TextView::new();
+    t_words.set_wrap_mode(gtk::WrapMode::None);
+    t_words.set_accepts_tab(false);
+    t_words.set_top_margin(4);
+    t_words.set_bottom_margin(4);
+    t_words.set_left_margin(6);
+    t_words.set_right_margin(6);
+    t_words.buffer().set_text("n.cover");
+    t_words.set_tooltip_text(Some(
+        "The words. Enter starts a new line; nothing wraps on its own — a line break here is a decision, not an accident of width.",
+    ));
+    let t_frame = gtk::Frame::new(None);
+    t_frame.set_child(Some(&t_words));
+    t_frame.set_hexpand(true);
+    typ_a.append(&t_frame);
+    let t_font = gtk::FontDialogButton::new(Some(gtk::FontDialog::new()));
+    t_font.set_level(gtk::FontLevel::Face);
+    t_font.set_use_size(false);
+    t_font.set_use_font(true);
+    t_font.set_font_desc(&gtk::pango::FontDescription::from_string(&TextSpec::default().font));
+    t_font.set_tooltip_text(Some(
+        "The font. The size is the slider below — a fraction of the canvas, not points.",
+    ));
+    typ_a.append(&t_font);
+    let t_colour = ColourWell::new(shared, TextSpec::default().colour, "Type colour: your current pick, recent colours and pinned palettes");
+    typ_a.append(&t_colour.widget);
+    let b_type = Button::with_label("+ Type");
+    b_type.set_tooltip_text(Some(
+        "Set the words on the canvas, over what is there. Saved as SVG they are outlines, not a font reference, so the file looks the same on a machine without the font.",
+    ));
+    typ_a.append(&b_type);
+    // The words box grows a line at a time; the buttons stay their own size.
+    t_font.set_valign(gtk::Align::Center);
+    b_type.set_valign(gtk::Align::Center);
+    typ_lbl.set_valign(gtk::Align::Center);
+    typ.append(&typ_a);
+
+    // Missing font, and whether the controls are editing a step.
+    // Shown only when there is something to warn about: a font that is not
+    // installed, and is being substituted.
+    let t_note = Label::new(None);
+    t_note.add_css_class("dim-label");
+    t_note.set_xalign(0.0);
+    t_note.set_wrap(true);
+    t_note.set_visible(false);
+    typ.append(&t_note);
+
+    let typ_b = GBox::new(Orientation::Horizontal, 6);
+    let labelled = |row: &GBox, text: &str, scale: &gtk::Scale, tip: &str| {
+        let l = Label::new(Some(text));
+        l.add_css_class("dim-label");
+        row.append(&l);
+        scale.set_hexpand(true);
+        scale.set_draw_value(true);
+        scale.set_value_pos(gtk::PositionType::Right);
+        scale.set_tooltip_text(Some(tip));
+        row.append(scale);
+    };
+    // Logarithmic: the slider runs over 0…1 and the size is derived from it.
+    let t_size = gtk::Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.001);
+    t_size.set_value(text_size_slider_position(TextSpec::default().size));
+    {
+        let canvas = canvas.clone();
+        // The size as a percent, and the pixels it comes out at, because that
+        // is what a size is known by even when the model is a ratio.
+        t_size.set_format_value_func(move |_, v| {
+            let size = text_size_from_slider(v);
+            format!("{:.0}% \u{b7} {} px", size * 100.0, (size * canvas.get() as f64).round())
+        });
+    }
+    labelled(&typ_b, "Size", &t_size,
+        "The em as a fraction of the canvas, so changing the output size scales the type with it. Logarithmic, and it runs past 100%: a letter larger than the square it is cropped by is a deliberate thing to draw.");
+    let t_track = gtk::Scale::with_range(Orientation::Horizontal, TEXT_TRACKING_MIN, TEXT_TRACKING_MAX, 0.01);
+    t_track.set_value(0.0);
+    t_track.set_digits(2);
+    labelled(&typ_b, "Tracking", &t_track,
+        "Letter spacing, as a fraction of the font size. Negative sets it tight — letters touching is something a monogram does on purpose.");
+    let t_lines = gtk::Scale::with_range(Orientation::Horizontal, 0.8, 2.5, 0.01);
+    t_lines.set_value(TextSpec::default().line_spacing);
+    t_lines.set_digits(2);
+    labelled(&typ_b, "Lines", &t_lines, "Line height, as a multiple of the font size. Only matters with more than one line.");
+    typ.append(&typ_b);
+
+    // Placement gets its own row: sharing one squeezed six sliders to their
+    // knobs. The column scrolls when the page is taller than the window.
+    let typ_c = GBox::new(Orientation::Horizontal, 6);
+    let pos_lbl = Label::new(Some("Place"));
+    pos_lbl.add_css_class("dim-label");
+    typ_c.append(&pos_lbl);
+    // Nine places: a label's wording lands on one of these far more often than
+    // anywhere else. The sliders are for anything between them.
+    let t_grid = gtk::Grid::new();
+    t_grid.set_row_spacing(2);
+    t_grid.set_column_spacing(2);
+    t_grid.set_valign(gtk::Align::Center);
+    let mut t_places: Vec<(Button, f64, f64)> = Vec::new();
+    for (row, y) in [0.25, 0.5, 0.75].into_iter().enumerate() {
+        for (col, x) in [0.25, 0.5, 0.75].into_iter().enumerate() {
+            let b = Button::new();
+            b.set_size_request(18, 12);
+            b.add_css_class("type-place");
+            b.set_tooltip_text(Some(&format!("Centre the type at {:.0}% across, {:.0}% down", x * 100.0, y * 100.0)));
+            t_grid.attach(&b, col as i32, row as i32, 1, 1);
+            t_places.push((b, x, y));
+        }
+    }
+    typ_c.append(&t_grid);
+    let t_x = gtk::Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.005);
+    t_x.set_value(0.5);
+    t_x.set_digits(2);
+    labelled(&typ_c, "Across", &t_x, "Where the block's centre sits, left to right, as a fraction of the canvas");
+    let t_y = gtk::Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.005);
+    t_y.set_value(0.5);
+    t_y.set_digits(2);
+    labelled(&typ_c, "Down", &t_y, "Where the block's centre sits, top to bottom, as a fraction of the canvas");
+    typ.append(&typ_c);
+    // Shown with the Build row, once there is something to build on.
+    bld.bind_property("visible", &typ, "visible").sync_create().build();
+    box_.append(&typ);
 
     let open_in_picker: OpenInPicker = Rc::new(RefCell::new(None));
     let to_picker: FnSlot = Rc::new(RefCell::new(None));
@@ -4067,39 +4386,16 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
 
     let apply = {
         let push_op = push_op.clone();
-        let shared = shared.clone();
-        let window = window.clone();
         let mask_shape = mask_shape.clone();
         let mask_amount = mask_amount.clone();
         let mask_fit = mask_fit.clone();
+        let (w_solid, w_rim, w_corner) = (w_solid.clone(), w_rim.clone(), w_corner.clone());
         Rc::new(move |fill_kind: u8| {
-            let (cur, prev) = {
-                let s = shared.borrow();
-                (
-                    s.current.or_else(|| s.data.history.first().copied()),
-                    s.data.history.get(1).copied().or(s.current),
-                )
-            };
             let fill = match fill_kind {
                 0 => OuterFill::Alpha,
                 1 => OuterFill::White,
-                2 => match cur {
-                    Some(c) => OuterFill::Solid(c),
-                    None => {
-                        show_error(&window, "Pick a colour first — that is the fill.");
-                        return;
-                    }
-                },
-                _ => match (cur, prev) {
-                    (Some(i), Some(o)) => OuterFill::Gradient { inner: i, outer: o },
-                    _ => {
-                        show_error(
-                            &window,
-                            "A gradient needs two colours — pick a second one.",
-                        );
-                        return;
-                    }
-                },
+                2 => OuterFill::Solid(w_solid.get()),
+                _ => OuterFill::Gradient { inner: w_rim.get(), outer: w_corner.get() },
             };
             // The mask applies to whatever is on the canvas now — the framed
             // source, or a design you have already built up.
@@ -4124,32 +4420,181 @@ fn build_image_view(window: &ApplicationWindow, shared: &SharedState) -> ImageVi
         #[strong]
         push_op,
         #[strong]
-        shared,
-        #[weak]
-        window,
-        move |_| {
-            // The same colour the Disc's Colour fill takes.
-            let cur = {
-                let s = shared.borrow();
-                s.current.or_else(|| s.data.history.first().copied())
-            };
-            match cur {
-                Some(c) => push_op(Operation::Background(c)),
-                None => show_error(&window, "Pick a colour first \u{2014} that is the background."),
-            }
-        }
+        w_bg,
+        move |_| push_op(Operation::Background(w_bg.get()))
     ));
 
     b_square.connect_clicked(clone!(
         #[strong]
         push_op,
+        #[strong]
+        w_square,
         #[weak]
         sq_scale,
         move |_| {
-            push_op(Operation::Square {
-                frac: sq_scale.value() / 100.0,
-                colour: Rgb { r: 0, g: 0, b: 0 },
-            })
+            push_op(Operation::Square { frac: sq_scale.value() / 100.0, colour: w_square.get() })
+        }
+    ));
+
+    // ---- Type behaviour ----
+    // The controls as a spec. Fonts come back from the dialog with a size;
+    // the slider owns size, so it is dropped from the stored description.
+    let type_now: Rc<dyn Fn() -> TextSpec> = {
+        let t_words = t_words.clone();
+        let t_font = t_font.clone();
+        let t_colour = t_colour.clone();
+        let (t_size, t_track, t_lines, t_x, t_y) = (t_size.clone(), t_track.clone(), t_lines.clone(), t_x.clone(), t_y.clone());
+        Rc::new(move || {
+            let buf = t_words.buffer();
+            let font = t_font
+                .font_desc()
+                .map(|mut d| {
+                    d.unset_fields(gtk::pango::FontMask::SIZE);
+                    d.to_str().to_string()
+                })
+                .unwrap_or_else(|| TextSpec::default().font);
+            TextSpec {
+                text: buf.text(&buf.start_iter(), &buf.end_iter(), false).to_string(),
+                font,
+                size: text_size_from_slider(t_size.value()),
+                colour: t_colour.get(),
+                x: t_x.value(),
+                y: t_y.value(),
+                tracking: t_track.value(),
+                line_spacing: t_lines.value(),
+            }
+        })
+    };
+    // True while the controls are being set FROM the document, so their own
+    // change handlers do not turn that into an edit.
+    let type_syncing: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    // The row's own label says whether the controls are editing a step:
+    // "Type" is a recipe for + Type, "Editing" is the last step, live.
+    let type_note: Rc<dyn Fn(Option<&Composition>)> = {
+        let t_note = t_note.clone();
+        let typ_lbl = typ_lbl.clone();
+        let type_now = type_now.clone();
+        Rc::new(move |d: Option<&Composition>| {
+            let spec = type_now();
+            let editing = d.is_some_and(|d| matches!(d.ops.last(), Some(Operation::Text(_))));
+            typ_lbl.set_text(if editing { "Editing" } else { "Type" });
+            typ_lbl.set_tooltip_text(Some(if editing {
+                "These controls are editing the last step, live. + Type adds another."
+            } else {
+                "Set the controls, then + Type puts the words on the canvas."
+            }));
+            let missing = !font_is_available(&spec.font);
+            if missing {
+                t_note.set_text(&format!(
+                    "\u{26a0} \u{201c}{}\u{201d} is not installed \u{2014} another face is being substituted.",
+                    spec.font
+                ));
+            }
+            t_note.set_visible(missing);
+        })
+    };
+    // A control changed: if the last step is type, it becomes these controls.
+    let type_edit: Rc<dyn Fn()> = {
+        let doc = doc.clone();
+        let mutate = mutate.clone();
+        let type_now = type_now.clone();
+        let type_syncing = type_syncing.clone();
+        let type_note = type_note.clone();
+        Rc::new(move || {
+            if type_syncing.get() {
+                return;
+            }
+            let cur = doc.borrow().clone();
+            match cur {
+                Some(mut d) if matches!(d.ops.last(), Some(Operation::Text(_))) => {
+                    *d.ops.last_mut().unwrap() = Operation::Text(type_now());
+                    mutate(d, Some("type"));
+                }
+                other => type_note(other.as_ref()),
+            }
+        })
+    };
+    *doc_shown.borrow_mut() = Some({
+        let type_syncing = type_syncing.clone();
+        let type_note = type_note.clone();
+        let t_words = t_words.clone();
+        let t_font = t_font.clone();
+        let t_colour = t_colour.clone();
+        let (t_size, t_track, t_lines, t_x, t_y) = (t_size.clone(), t_track.clone(), t_lines.clone(), t_x.clone(), t_y.clone());
+        Rc::new(move |d: &Composition| {
+            if let Some(Operation::Text(t)) = d.ops.last() {
+                type_syncing.set(true);
+                let buf = t_words.buffer();
+                if buf.text(&buf.start_iter(), &buf.end_iter(), false) != t.text.as_str() {
+                    buf.set_text(&t.text);
+                }
+                let want = gtk::pango::FontDescription::from_string(&t.font);
+                if t_font.font_desc().map(|mut f| { f.unset_fields(gtk::pango::FontMask::SIZE); f.to_str().to_string() }) != Some(want.to_str().to_string()) {
+                    t_font.set_font_desc(&want);
+                }
+                t_colour.set(t.colour);
+                t_size.set_value(text_size_slider_position(t.size));
+                t_track.set_value(t.tracking);
+                t_lines.set_value(t.line_spacing);
+                t_x.set_value(t.x);
+                t_y.set_value(t.y);
+                type_syncing.set(false);
+            }
+            type_note(Some(d));
+        })
+    });
+    *t_colour.on_take.borrow_mut() = Some(type_edit.clone());
+    t_words.buffer().connect_changed(clone!(
+        #[strong]
+        type_edit,
+        move |_| type_edit()
+    ));
+    t_font.connect_font_desc_notify(clone!(
+        #[strong]
+        type_edit,
+        move |_| type_edit()
+    ));
+    for sc in [&t_size, &t_track, &t_lines, &t_x, &t_y] {
+        sc.connect_value_changed(clone!(
+            #[strong]
+            type_edit,
+            move |_| type_edit()
+        ));
+    }
+    for (b, x, y) in &t_places {
+        let (x, y) = (*x, *y);
+        b.connect_clicked(clone!(
+            #[strong]
+            type_syncing,
+            #[strong]
+            type_edit,
+            #[weak]
+            t_x,
+            #[weak]
+            t_y,
+            move |_| {
+                // One edit for both axes, not two.
+                type_syncing.set(true);
+                t_x.set_value(x);
+                t_y.set_value(y);
+                type_syncing.set(false);
+                type_edit();
+            }
+        ));
+    }
+    b_type.connect_clicked(clone!(
+        #[strong]
+        push_op,
+        #[strong]
+        type_now,
+        #[weak]
+        window,
+        move |_| {
+            let spec = type_now();
+            if spec.text.trim().is_empty() {
+                return show_error(&window, "Type some words first.");
+            }
+            push_op(Operation::Text(spec));
         }
     ));
 
@@ -4887,6 +5332,8 @@ const APP_CSS: &str = "
   .dim-label { opacity: 0.74; }
 
   .section-head { font-weight: 700; }
+  /* The Type section's nine places: small cells, not full buttons. */
+  button.type-place { min-width: 16px; min-height: 10px; padding: 0; }
   /* Monochrome accents (the suite's default for new apps). A linked group
      of toggles (the header switch, HEX / RGB / HSL, Batch's scope) shows
      the chosen one inverted: the text colour as ground, the label or icon in

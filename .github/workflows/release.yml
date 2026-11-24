@@ -42,7 +42,10 @@ jobs:
             libgtk-4-dev \
             libx11-dev libx11-xcb-dev libxcb1-dev libxcursor-dev \
             librsvg2-bin \
-            librsvg2-common
+            librsvg2-common \
+            fonts-dejavu-core
+          # fonts-dejavu-core: the type tests set DejaVu Sans by name and
+          # assert it is not a substitution, so the runner must have it.
           # libx11-xcb-dev is the one that is easy to miss: the xcb crate's
           # `xlib_xcb` feature links -lX11-xcb, which lives in its own package
           # rather than in libx11-dev.

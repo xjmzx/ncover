@@ -34,6 +34,13 @@ X11 screen picker and grew into a small artwork tool. Part of the `n.*` suite.
   centred squares, and a mask — disc, rounded or chamfered square, fitted to
   the canvas or to the artwork — with alpha / white / colour / gradient
   corners. The steps stack.
+- **Colour wells** for every colour a step uses (type, square, background,
+  mask fills, Batch's fills): the system colour chooser, plus a palette
+  button holding your current pick, recent colours and pinned palettes.
+- **Type:** words set in any installed font, sized as a fraction of the
+  canvas (2%–200%, on a logarithmic slider), with tracking, line height and a
+  nine-way placement grid. The controls edit the last type step live. Saved as SVG, type is **outlines**, never a font
+  reference, so the file looks the same on a machine without the font.
 - A **Source / Result** rail to compare the raw image against what you built.
 - Save as PNG or **SVG** (when every step has a vector form; the tooltip says
   why when not), or **Overwrite** the original PNG or JPEG in place, in its

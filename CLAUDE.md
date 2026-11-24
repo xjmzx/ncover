@@ -106,6 +106,63 @@ The macOS sibling has the same shape (`Composition.swift`). That is a shared
 idea, not shared code, and `docs/macos-parity-plan.md` is the plan for
 porting further features across.
 
+## Type (text.rs)
+
+- **`layout_text` is the only place a line's position is decided.**
+  `draw_text` draws its `PlacedLine`s through `pangocairo::show_layout_line`
+  and `text_svg_path` traces the same lines with `layout_line_path`. That is
+  why they agree; `type_svg_matches_the_raster_side` holds them to it through
+  librsvg (mean 0.17 / 255 on 2026-11-24). Do not measure or place a line
+  anywhere else.
+- **No hinting, on purpose** (`text_context`): greyscale antialiasing, hint
+  style none, hint metrics off, and unrounded glyph positions. Hinting snaps
+  advances to whole pixels, so type would stop scaling linearly with the
+  canvas and the SVG's outlines would sit fractionally off the screen's
+  pixels. Subpixel AA is off because this layer's background is nothing at
+  all, and it would leave coloured fringes on transparency.
+- **The raster layer is coverage, not colour.** Lines are drawn opaque onto a
+  transparent ARGB32 surface and only its alpha is read; the colour is the
+  spec's, composited over the canvas in straight alpha. That sidesteps the
+  premultiplied surface entirely, and a test checks every antialiased edge
+  pixel over transparency still carries the exact colour.
+- **Type is outlines in SVG, never `<text font-family>`.** A font reference
+  renders differently, or not at all, without the font. `nonzero` winding,
+  because that is what a counter is wound for.
+- **Size and position are fractions of the canvas.** Size is the em
+  (`set_absolute_size`), on a logarithmic slider from 2% to 200%. The range
+  runs past 100% on purpose. A size change still drops the build, as it does
+  for every step (`set_canvas`).
+- **The block is measured first ascent to last descent**, not as n line
+  heights, or a single line sits off-centre by the font's leading.
+- **`font_is_available` asks fontconfig what it actually loaded.** Pango
+  never fails to give *a* font. Generic families (`Sans`, `Serif`,
+  `Monospace`) count as available: resolving one to a face is the point of
+  them, not a substitution.
+- **The Type controls edit the LAST step when it is type, and follow undo.**
+  `show_doc` calls the `doc_shown` slot after every document it puts on
+  screen; the Type section fills its controls from the last step there,
+  under `type_syncing`, so setting a control from the document is not
+  itself an edit. Edits from the controls go through `mutate` in the
+  `"type"` group, so a burst of typing or a slider drag is one undo step.
+- **Every colour a step uses comes from a `ColourWell`**, not from the last
+  pick: Type, Square, Background, the mask's Colour / Rim / Corner, and
+  Batch's Colour / Rim / Corner (which `recipe_now` reads, so they are in the
+  grid's key; the ticker shows only the ones the recipe uses). A well is the
+  Mac's PaletteWell: a `ColorDialogButton` (any colour) linked to a palette
+  `MenuButton` (current pick, recent, pinned).
+- **A colour well's choice is not a pick.** It sets the well and touches
+  neither `current` nor the history, or choosing a colour you already had
+  would reorder the list you chose it from. `set` stores the colour before
+  moving the button, so a colour set from code (undo) does not fire
+  `on_take` as if someone had chosen it.
+- **The palette button's glyph is drawn, not a stock icon.** `color-select`
+  is an eyedropper (it reads as "pick from the screen") and Yaru draws its
+  colour and graphics icons as RGB circles or a picture frame.
+- **The Type rows make the Edit page taller than a 749 px window** (a
+  laptop at 1.25 text scaling). The image column already scrolls for Batch;
+  it scrolls for this too. Keep placement on its own row: one row of six
+  sliders squeezed every track down to its knob.
+
 ## Batch: the count is a promise
 
 - **There is one walk, `walk_scope`** (`batch.rs`). `find_in_scope` (run,
@@ -213,7 +270,7 @@ porting further features across.
   root `xcolor` crate links `xlib` and `xcb`, so *it* is X11 and therefore
   Linux only, with no Wayland path. The GTK4 app is neither: `make gui` is
   `cargo build -p ncover`, which never compiles the X11 crates at all. The app
-  builds, tests (45 passing) and runs on macOS **unmodified** against Homebrew
+  builds, tests (45 passing at the time) and runs on macOS **unmodified** against Homebrew
   `gtk4`, `gdk-pixbuf` and `librsvg` — verified 2026-09-22. This file used to
   claim the opposite; it was reasoning from the root crate.
 - **The screen pick has two backends (2026-10-01).** On Wayland
